@@ -96,72 +96,6 @@ if (!debug) {
 
 // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
 
-const strokeLifetime = 10000;
-
-class Frame {
-    constructor() {
-        this.strokes = [];
-    }
-}
-
-class Layer {
-    constructor() {
-        this.frames = [];
-    }
-
-    getFrame(index) {
-        if (!this.frames[index]) {
-            //console.log("Client asked for frame " + index +", but it's missing.");
-            for (let i=0; i<index+1; i++) {
-                if (!this.frames[i]) {
-                    let frame = new Frame();
-                    this.frames.push(frame); 
-                    //console.log("* Created frame " + i + ".");
-                }
-            }
-        }
-        //console.log("Retrieving frame " + index + " of " + this.frames.length + ".");
-        return this.frames[index];
-    }
-
-    addStroke(data) {
-        try {
-            let index = data["index"];
-            if (!isNaN(index)) {
-                this.getFrame(index); 
-
-                this.frames[index].strokes.push(data); 
-                console.log("<<< Received a stroke with color (" + data["color"] + ") and " + data["points"].length + " points.");
-            }
-        } catch (e) {
-            console.log("Error adding stroke" + e.data);
-        }
-    }
-}
-
-let layer = new Layer();
-
-setInterval(function() {
-    /*
-    let time = new Date().getTime();
-
-    for (let i=0; i<layer.frames.length; i++) {
-        for (let j=0; j<layer.frames[i].strokes.length; j++) {
-            if (time > layer.frames[i].strokes[j]["timestamp"] + strokeLifetime) {
-                layer.frames[i].strokes.splice(j, 1);
-                console.log("X Removing frame " + i + ", stroke " + j + ".");
-            }
-        }
-    }
-    */
-    for (let i=0; i<layer.frames.length; i++) {
-        layer.frames[i].strokes.shift();
-        console.log("X Removing oldest stroke from frame " + i + ".");
-    }
-}, strokeLifetime);
-
-// ~ ~ ~ ~
-
 let lastIndex = 0;  // for ws
 
 io.on("connection", function(socket) {
@@ -171,27 +105,10 @@ io.on("connection", function(socket) {
         console.log("A socket.io user disconnected.");
     });
     //~
-    socket.on("clientStrokeToServer", function(data) { 
-        //console.log(data);
-        try { // json coming from Unity needs to be parsed...
-            let newData = JSON.parse(data);
-            layer.addStroke(newData);
-        } catch (e) { // ...but json coming from JS client does not need to be
-            layer.addStroke(data);
-        }
-    });
-    //~
-    socket.on("clientRequestFrame", function(data) {
-        //console.log(data["num"]);
-        let index = data["num"];
-        if (index != NaN) {
-            lastIndex = index; // for ws
-            let frame = layer.getFrame(index);
-            if (frame && frame.strokes.length > 0) {
-                io.emit("newFrameFromServer", frame.strokes);
-                console.log("> > > Sending a new frame " + frame.strokes[0]["index"] + " with " + frame.strokes.length + " strokes.");
-            }
-        }
+    socket.on("example", function(data) { 
+        console.log(data);
+        //let newData = JSON.parse(data);
+        //io.emit("newMessage", test);
     });
 });
 
@@ -203,14 +120,6 @@ ws.on("connection", function(socket) {
     };
     //~
     socket.onmessage = function(event) {
-        //console.log(data["num"]);
-        let index = lastIndex; //data["num"];
-        if (index != NaN) {
-            let frame = layer.getFrame(index);
-            if (frame && frame.strokes.length > 0) {
-                socket.send(JSON.stringify(frame.strokes));
-                console.log("> WS > Sending a new frame " + frame.strokes[0]["index"] + " with " + frame.strokes.length + " strokes.");
-            }
-        }
+        //socket.send(JSON.stringify(test));
     };
 });
