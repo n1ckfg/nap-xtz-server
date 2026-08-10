@@ -96,8 +96,6 @@ if (!debug) {
 
 // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
 
-let lastIndex = 0;  // for ws
-
 io.on("connection", function(socket) {
     console.log("A socket.io user connected.");
     //~
