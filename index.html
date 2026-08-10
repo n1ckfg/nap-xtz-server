@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html>
+
+	<head>
+		<title>NAPLPS x XTZ</title>
+		<!-- unsafe-eval: required by Beacon SDK (uses new Function() internally). frame-src/ws: required for WalletConnect iframe and local wallet discovery. -->
+		<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net blob:; connect-src 'self' https: wss: ws: blob:; img-src 'self' data: blob: https:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-src https:;">
+		<link type="text/css" rel="stylesheet" href="./css/main.css"/>
+
+		<!-- Three.js library for drawing mode -->
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+					"three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+				}
+			}
+		</script>
+
+		<!-- Load MediaPipe Tasks as a Module and expose to window -->
+		<script type="module">
+			import { GestureRecognizer, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+			window.GestureRecognizer = GestureRecognizer;
+			window.FilesetResolver = FilesetResolver;
+		</script>
+		<script type="text/javascript" src="./js/libraries/p5js/p5.min.js"></script>
+		<script type="text/javascript" src="./js/libraries/p5js/p5.dom.min.js"></script>
+		<script type="text/javascript" src="./js/libraries/p5js/p5.svg.js"></script>
+		<!--<script type="text/javascript" src="./js/libraries/gifjs/gif.js"></script>-->
+		<script type="text/javascript" src="./js/telidon/naplps.js"></script>
+		<script type="text/javascript" src="./js/telidon/TelidonP5.js"></script>
+		<script type="text/javascript" src="https://unpkg.com/@airgap/beacon-dapp@4.3.0/dist/walletbeacon.dapp.min.js"></script>
+		<script type="text/javascript" src="./js/tezos/tezos.js"></script>
+		<script type="text/javascript">
+			"use strict";
+
+			let recording = true;
+			let c;
+			//let gif;
+			let posCounterX = 0;
+			let posCounterY = 0;
+
+			let telidon = [];
+			let maxLength = 3;
+
+			let scaleFactor = 1;
+
+			// Slideshow mode: toggled on by the "slideshow" link. While active it
+			// plays a random .nap from ./images every slideshow_interval seconds.
+			// Loading specific content or entering live drawing stops it.
+			let slideshow_interval = 10; // seconds
+			let slideshowActive = false;
+			let liveDrawingActive = false;
+			let slideshowPlayTimer = null; // interval between slides
+			// Fallback list (used if ./images/nap-list.json fails to load).
+			let napFiles = [
+			    "output_20260222_181752.nap", "output_20260222_181957.nap",
+			    "output_20260222_181616.nap", "output_20260222_181140.nap",
+			    "output_20260222_181729.nap", "output_20260222_181558.nap",
+			    "output_20260222_181503.nap"
+			];
+
+			let dropZone;
+			let sW = 640;
+			let sH = 480;
+
+			let defaultFont;
+
+			let preview, explanation, explanationbg;
+			//let shark, skull, santa, beer, haunt, email, mouse;
+
+			let isMobile = false;
+
+
+			function preload() {
+			    isMobile = detectMobile();
+
+			    //if (isMobile) 
+			    //loadNewTelidon("./images/output_20260222_181752.nap");
+			    loadLatestToken();
+			}
+
+			function setup() {
+				// Scale the canvas to fill the window while preserving the
+				// 640x480 aspect ratio (see grid/js/main.js for reference).
+				scaleFactor = Math.min(windowWidth / sW, windowHeight / sH);
+				c = createCanvas(sW * scaleFactor, sH * scaleFactor);
+				c.id("main-canvas");
+
+				// Render at 1x device pixels. On HiDPI/Retina the default density
+				// (2+) would draw this large canvas at 4x the pixels for little
+				// visible gain on the retro vector art. (grid/js/main.js does the same.)
+				pixelDensity(1);
+
+			    //if (!isMobile) setupGif();
+
+				dropZone = document.getElementsByTagName("body")[0];
+			    dropZone.addEventListener('dragover', onDragOver);
+			    dropZone.addEventListener('drop', onDrop);
+			    
+			    defaultFont = loadFont("./files/fonts/Telidon-Bold/Telidon-Bold.ttf", function(font) {
+			        textFont(font);
+			        textSize(36);
+			        textAlign(LEFT);        
+			    });
+
+			    //preview = document.getElementById("preview");
+			    //setPreview("shark");
+			    
+			    /*
+			    explanation = document.getElementById("explanation");
+			    explanationbg = document.getElementById("explanation-bg");
+			    explanation.addEventListener("click", function() {
+			        explanation.style = "opacity: 0";
+			        explanationbg.style = "opacity: 0";
+			    });
+			    */
+				document.getElementById("latest").addEventListener("click", function() {
+                    telidon = [];
+				    stopSlideshow();
+				    loop(); // redraw now; loadLatestToken() re-loops when content arrives
+			        loadLatestToken();
+			    });
+
+				document.getElementById("clear").addEventListener("click", function() {
+                    telidon = [];
+				    stopSlideshow();
+				    loop(); // redraw once to show the placeholder, then idle
+			    });
+
+			    // Start the slideshow (loading other content stops it).
+			    document.getElementById("slideshow").addEventListener("click", function() {
+			        startSlideshow();
+			    });
+
+			    // Initialise Tezos wallet and load latest on-chain token.
+			    initTezos();
+
+			    // Load the .nap manifest for slideshow mode (falls back to the
+			    // hardcoded napFiles list if the fetch fails).
+			    fetch("./images/nap-list.json")
+			        .then(function(r) { return r.json(); })
+			        .then(function(list) { if (Array.isArray(list) && list.length) napFiles = list; })
+			        .catch(function() { /* keep fallback list */ });
+			}
+
+			function draw() {
+				background(0);
+			    if (telidon.length < 1) {
+			        fill(255);
+			        textAlign(CENTER);
+			        text("\\\\ DRAG ' n ' DROP //", width/2, height/2);
+			        textAlign(LEFT);
+			        noLoop(); // idle placeholder is static; stop redrawing
+			        return;
+			    }
+
+			    // Draw the (640-unit) artwork scaled to fill the canvas.
+			    push();
+			    scale(scaleFactor);
+			    translate(0,sH-sW);
+
+			    let allFinished = true;
+			    for (let i=0; i<telidon.length; i++) {
+					telidon[i].draw();
+					if (!telidon[i].finished) allFinished = false;
+				}
+			    pop();
+
+			    // Once every drawing has fully revealed, the frame is static —
+			    // stop the loop until new content arrives (see loop() calls below).
+			    if (allFinished) noLoop();
+
+			    /*
+			    if (!isMobile && recording && frameCount % 2 == 0) {
+			        gif.addFrame(c.elt, {delay: 1, copy: true});
+			    }
+
+			    if (!isMobile && recording && telidon[telidon.length-1].finished) {
+			        recording = false;
+			        gif.render();
+			    }
+			    */
+			}
+
+			function windowResized() {
+			    scaleFactor = Math.min(windowWidth / sW, windowHeight / sH);
+			    resizeCanvas(sW * scaleFactor, sH * scaleFactor);
+			    loop(); // redraw at the new size (re-idles once finished)
+			}
+
+			// Show the copy icon when dragging over.  Seems to only work for chrome.
+			function onDragOver(e) {
+			    e.stopPropagation();
+			    e.preventDefault();
+			    e.dataTransfer.dropEffect = 'copy';    
+			}
+
+			function onDrop(e) {
+			    e.stopPropagation();
+			    e.preventDefault();
+			    let file = e.dataTransfer.files[0]; 
+		        let reader = new FileReader();
+		        reader.onload = function(e2) {
+		        	const fileNameArray = file.name.split(".");
+		        	if (fileNameArray[fileNameArray.length-1] === "svg") {
+		        		let div = document.createElement('div');
+        				let element = new p5.SVGElement(div);
+                		div.innerHTML = e2.target.result;
+                		let svg = div.querySelector('svg');
+                		element.elt = svg;
+
+		        		setupSvg(element);
+		        	} else {
+			            loadTelidonFromText(e2.target.result);
+		        	}
+		        }
+		        reader.readAsText(file, 'UTF-8');   
+			}
+
+			function loadTelidonFromText(input, doClear=true) {
+				stopSlideshow(); // deliberate content load takes over from the slideshow
+				window.pendingNapRaw = input;
+				if (doClear) {
+					telidon = []
+				} else {
+	            	if (telidon.length >= maxLength) telidon.splice(0,1);
+				}
+	            telidon.push(new TelidonDraw([input], sW, sW));
+	            recording = true;
+				setSize(input.length);
+				loop(); // new content to animate — restart the draw loop
+			}
+			window.loadTelidonFromText = loadTelidonFromText;
+
+			function onFormSubmit() {
+				const field = document.getElementById("naplps_field");
+				loadTelidonFromText(field.value); //, false);
+			}
+
+			function loadNewTelidon(fileName) { 
+			    loadStrings(fileName, function(response) {
+			        telidon = [];
+			        let reader = new FileReader();
+			        reader.onload = function(e2) {
+			        	window.pendingNapRaw = e2.target.result;
+			            telidon.push(new TelidonDraw([e2.target.result], sW, sW));
+			            recording = true;
+						setSize(e2.target.result.length);
+						loop(); // new content to animate — restart the draw loop
+			        }
+			        reader.readAsText(new Blob(response), 'UTF-8');
+			    });
+			}
+
+			// ── Slideshow mode ──
+
+			function startSlideshow() {
+			    if (liveDrawingActive || slideshowActive) return;
+			    slideshowActive = true;
+			    const link = document.getElementById("slideshow");
+			    if (link) link.classList.add("active");
+			    loadRandomNap();
+			    slideshowPlayTimer = setInterval(function() {
+			        if (liveDrawingActive) { stopSlideshow(); return; }
+			        loadRandomNap();
+			    }, slideshow_interval * 1000);
+			}
+
+			function stopSlideshow() {
+			    slideshowActive = false;
+			    const link = document.getElementById("slideshow");
+			    if (link) link.classList.remove("active");
+			    if (slideshowPlayTimer !== null) {
+			        clearInterval(slideshowPlayTimer);
+			        slideshowPlayTimer = null;
+			    }
+			}
+			window.stopSlideshow = stopSlideshow;
+
+			function loadRandomNap() {
+			    if (!napFiles.length) return;
+			    const file = napFiles[Math.floor(Math.random() * napFiles.length)];
+			    loadNewTelidon("./images/" + file);
+			}
+
+			//function setPreview(name) {
+			//    preview.style.backgroundImage = "url(./tools/rosetta_stone/cover/png/" + name + ".png)";
+			//}
+
+			/*
+			function setupGif() {
+			    gif = new GIF({
+			        workers: 4,
+			        workerScript: './js/libraries/gifjs/gif.worker.js', // https://github.com/jnordberg/gif.js/issues/59
+			        quality: 40
+			    });
+
+			    gif.on('finished', function(blob) {
+			        // https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/srcObject
+			        let img = document.createElement('img');
+			        img.src = URL.createObjectURL(blob);
+			        img.style = "width: " + sW/2 + "px; height: " + sH/2 + "px; position: absolute; left: " + posCounterX + "px; top: " + (posCounterY + sH + 29) + "px;";
+			        posCounterX += sW/2;
+			        if (posCounterX > 1.5 * sW) {
+			            posCounterX = 0;
+			            posCounterY += sH/2;
+			        }
+			        document.body.appendChild(img);
+
+			        setupGif();
+			    });
+			}
+			*/
+
+			function detectMobile() {
+			    if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|BB|PlayBook|IEMobile|Windows Phone|Kindle|Silk|Opera Mini/i.test(navigator.userAgent)) {
+			        return true;
+			    } else {
+			        return false;
+			    }
+			}		
+
+			// svg
+
+			function setupSvg(ps) {
+				let polylines, polygons, paths;
+				let input = [];
+				let offsetX = 0;
+				let offsetY = 0.25;
+
+			    let svgWidth = parseFloat(ps.attribute("width"));
+			    let svgHeight = parseFloat(ps.attribute("height"));
+			    if (!svgWidth || !svgHeight) {
+			    	let vb = (ps.attribute("viewBox") || "").trim().split(/[\s,]+/);
+			    	svgWidth  = vb.length >= 4 ? parseFloat(vb[2]) : 512;
+			    	svgHeight = vb.length >= 4 ? parseFloat(vb[3]) : 512;
+			    }
+
+		    	// NAPLPS can only use a fill color or a stroke color in one path, not both.
+				// fill-opacity, stroke-opacity, stroke-linecap, and stroke-width are not used.
+
+			    polygons = ps.query('polygon');
+				
+			    for (let path of polygons) {
+			    	let points = [];
+			    	let color = new Vector3(255, 255, 255);
+			    	let isFill = true;
+			    	
+					let strokeColorAttr = path.attribute("stroke"); // "#FEFEFE" or "none" 
+			    	let fillColorAttr = path.attribute("fill"); // "#FEFEFE" or "none" 			
+					
+					if (fillColorAttr !== "none") {
+						let colorHex = hexToRgb(fillColorAttr);
+						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+					} else if (fillColorAttr === "none" && strokeColorAttr !== "none") {
+						let colorHex = hexToRgb(strokeColorAttr);
+						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+					}
+
+			    	let pointsAttr = path.attribute("points").split(" ");
+			    	for (let pointAttr of pointsAttr) {
+			    		let pointAttrArray = pointAttr.split(",");
+			    		let point = new Vector2((float(pointAttrArray[0]) / sW) + offsetX, (float(pointAttrArray[1]/ sH * 0.75) + offsetY));
+			    		
+			    		if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+			    			points.push(point);
+			    		}
+			    	}
+					
+					points = rdpSimplify(points, 0.02);
+
+					const stroke = new NapInputWrapper(color, points, isFill);
+					input.push(stroke);
+			    }
+
+			    polylines = ps.query('polyline');
+
+			    for (let path of polylines) {
+			    	let points = [];
+			    	let color = new Vector3(0, 0, 0);
+			    	let isFill = false;
+			    	
+					let strokeColorAttr = path.attribute("stroke"); // "#FEFEFE" or "none" 
+			    	let fillColorAttr = path.attribute("fill"); // "#FEFEFE" or "none" 
+					
+					if (strokeColorAttr === "none" && fillColorAttr !== "none") {
+						let colorHex = hexToRgb(fillColorAttr);
+						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+					} else if (strokeColorAttr !== "none") {
+						let colorHex = hexToRgb(strokeColorAttr);
+						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+					}
+
+			    	let pointsAttr = path.attribute("points").split(" ");
+			    	for (let pointAttr of pointsAttr) {
+			    		let pointAttrArray = pointAttr.split(",");
+			    		let point = new Vector2((float(pointAttrArray[0]) / sW) + offsetX, (float(pointAttrArray[1]/ sH * 0.75) + offsetY));
+			    		
+			    		if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+							points.push(point);
+						}
+			    	}
+					
+					points = rdpSimplify(points, 0.02);
+
+					const stroke = new NapInputWrapper(color, points, isFill);
+					input.push(stroke);
+			    }
+
+			    paths = ps.query('path'); //ps.elt.querySelectorAll('path');
+
+			    for (let path of paths) {
+			    	let points = [];
+			    	let color = new Vector3(255, 255, 255);
+			    	let isFill = true;
+
+			    	let fillColorAttr = path.attribute('fill') || 'none';
+			    	let strokeColorAttr = path.attribute('stroke') || 'none';
+
+			    	if (fillColorAttr !== 'none') {
+			    		let colorHex = hexToRgb(fillColorAttr);
+			    		if (colorHex) color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+			    	} else if (fillColorAttr === 'none' && strokeColorAttr !== 'none') {
+			    		isFill = false;
+			    		let colorHex = hexToRgb(strokeColorAttr);
+			    		if (colorHex) color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+			    	} else {
+			    		color = new Vector3(255, 255, 255);
+			    	}
+
+			    	// Parse transform="translate(tx,ty)"
+			    	let tx = 0, ty = 0;
+			    	let transformAttr = path.attribute('transform');
+			    	if (transformAttr) {
+			    		let tMatch = /translate\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/.exec(transformAttr);
+			    		if (tMatch) { tx = parseFloat(tMatch[1]); ty = parseFloat(tMatch[2]); }
+			    	}
+
+			    	// Parse d attribute: M/L commands only (Z closes the path, no coords)
+			    	let d = path.attribute('d') || '';
+			    	let cmdRegex = /[ML]\s*(-?[\d.]+),(-?[\d.]+)/g;
+			    	let m;
+			    	while ((m = cmdRegex.exec(d)) !== null) {
+			    		let px = parseFloat(m[1]) + tx;
+			    		let py = parseFloat(m[2]) + ty;
+			    		let point = new Vector2((px / svgWidth) + offsetX, ((py / svgHeight) * 0.75) + offsetY);
+			    		//if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+			    		points.push(point);
+			    		//}
+			    	}
+
+			    	points = rdpSimplify(points, 0.02); // default 0.005, higher = more simplification
+
+			    	if (points.length > 0) {
+			    		const stroke = new NapInputWrapper(color, points, isFill);
+			    		input.push(stroke);
+			    	}
+			    }
+
+				const encoder = new NapEncoder(input);
+
+				// download nap
+				const _ts = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
+				const _blob = new Blob([encoder.napRaw], { type: 'text/plain' });
+				const _url = URL.createObjectURL(_blob);
+				const _a = document.createElement('a');
+				_a.href = _url;
+				_a.download = 'output_' + _ts + '.nap';
+				_a.click();
+				URL.revokeObjectURL(_url);
+
+				// Expose encoded NAPLPS for the Tezos mint flow.
+				window.pendingNapRaw = encoder.napRaw;
+				console.log('[nap-xtz] SVG encoded to NAPLPS, length:', encoder.napRaw.length);
+				const btnMint = document.getElementById('btn-mint');
+				if (btnMint) btnMint.style.display = 'inline-block';
+				if (typeof setStatus === 'function') setStatus('SVG encoded');
+
+				loadTelidonFromText(encoder.napRaw);
+			}
+
+		function rdpSimplify(points, epsilon) {
+			if (points.length <= 2) return points;
+			let start = points[0], end = points[points.length - 1];
+			let maxDist = 0, maxIdx = 0;
+			for (let i = 1; i < points.length - 1; i++) {
+				let dist = rdpPointLineDist(points[i], start, end);
+				if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+			}
+			if (maxDist > epsilon) {
+				let left = rdpSimplify(points.slice(0, maxIdx + 1), epsilon);
+				let right = rdpSimplify(points.slice(maxIdx), epsilon);
+				return left.slice(0, -1).concat(right);
+			}
+			return [start, end];
+		}
+
+		function rdpPointLineDist(p, a, b) {
+			let dx = b.x - a.x, dy = b.y - a.y;
+			let lenSq = dx * dx + dy * dy;
+			if (lenSq === 0) {
+				dx = p.x - a.x; dy = p.y - a.y;
+				return Math.sqrt(dx * dx + dy * dy);
+			}
+			let t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+			dx = p.x - (a.x + t * dx); dy = p.y - (a.y + t * dy);
+			return Math.sqrt(dx * dx + dy * dy);
+		}
+		window.rdpSimplify = rdpSimplify;
+
+		function hexToRgb(hex) {
+				let result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+				return result ? {
+					r: parseInt(result[1], 16),
+					g: parseInt(result[2], 16),
+					b: parseInt(result[3], 16)
+				} : null;
+			}
+
+			function componentToHex(c) {
+			  let hex = c.toString(16);
+			  return hex.length == 1 ? "0" + hex : hex;
+			}
+
+			function rgbToHex(r, g, b) {
+			  return "#" + componentToHex(r) + componentToHex(g) + componentToHex(b);
+			}	
+		</script>
+	</head>
+
+	<body>
+		<div id="container">
+			<div class="sketch">
+				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz"><i>source</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
+				<a href="javascript:void(0)" id="latest"><i>latest</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
+				<a href="javascript:void(0)" id="clear"><i>clear</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
+				<a href="javascript:void(0)" id="slideshow"><i>slideshow</i></a>
+			</div>
+
+			<!--<div class="preview-base" id="preview"></div>
+
+			<div class="preview-base" id="explanation-bg"></div>
+			<div class="explanation-base" id="explanation">
+				<p>
+					<b><a href="https://github.com/n1ckfg/Telidon/blob/master/js/telidon/TelidonP5.js">TelidonP5.js</a></b> allows NAPLPS vector graphics files to be displayed in a browser using <a href="https://p5js.org/">p5.js</a>. It depends on a companion encoder/decoder library <b><a href="https://github.com/n1ckfg/Telidon/blob/master/js/telidon/naplps.js">naplps.js</a></b> can also be used separately.
+				</p>
+				<p>
+					August 15th, 2018 marked the 40th anniversary of the <a href="https://en.wikipedia.org/wiki/Telidon">Telidon</a> vector graphics workstation, launched in 1978. The Telidon hardware was discontinued in 1985, but its file format, standardized as <a href="https://en.wikipedia.org/wiki/NAPLPS">NAPLPS</a>, thrived and remained in wide use throughout the <a href="https://en.wikipedia.org/wiki/Bulletin_board_system">BBS</a> era, until the mid-1990s. Thanks to its exceptionally small file size and limited animation features, NAPLPS can be seen as a technological ancestor of the <a href="https://en.wikipedia.org/wiki/GIF#Animated_GIF">animated GIF</a> and the <a href="https://en.wikipedia.org/wiki/SWF">Flash SWF</a>&mdash;a new artistic medium that could be both produced and distributed on the same machine.
+				</p>
+				<p>
+					From 1982&ndash;1985, members of the Toronto arts org <a href="http://interaccess.org/">InterAccess</a> used Telidon systems to produce an ambitious series of <a href="https://motherboard.vice.com/en_us/article/ezveak/the-original-net-artists">interactive BBS-based artworks</a> in the format.
+				</p>
+				-->
+				<!--
+				<p>
+					Three anniversary events were held at InterAccess in spring 2018:<br/>
+					<a href="http://interaccess.org/event/2018/naplps-adventure-new-media-art-history">http://interaccess.org/event/2018/naplps-adventure-new-media-art-history</a><br/>
+					<a href="http://interaccess.org/event/2018/digital-archaeology-excavating-telidon">http://interaccess.org/event/2018/digital-archaeology-excavating-telidon</a><br/>
+					<a href="http://interaccess.org/exhibition/telidon">http://interaccess.org/exhibition/telidon</a>
+				</p>
+				<p>
+					Nick Fox-Gieg&nbsp;&nbsp;/&nbsp;&nbsp;180326
+				</p>
+				-->
+			<!--</div>-->
+			<div id="naplps_field_container">
+				<div>
+					<form>
+						<label style="color: #ffffff;" for="naplps_field">Add NAPLPS Text: </label><br>
+						<input type="text" id="naplps_field" name="naplps_field"><br>
+	  					<input type="button" onclick="onFormSubmit()" value="Submit">
+					</form> 
+				</div>
+				<div style="position: relative; margin-left: 180px; margin-top: -60px;">
+					<button id="btn-connect" class="tezos-btn" onclick="stopSlideshow(); connectWallet()">Connect Wallet</button>
+					<button id="btn-disconnect" class="tezos-btn" onclick="stopSlideshow(); disconnectWallet()" style="display:none">Disconnect</button><br>
+					<button id="btn-mint" class="tezos-btn" onclick="stopSlideshow(); mintCurrentNaplps()">Mint to Tezos</button><br>
+					<span id="tezos-address" class="tezos-address"></span><br>
+					<span id="tezos-status" class="tezos-status"></span><br>
+					<span id="tezos-size" class="tezos-size"></span><br>
+				</div>
+				<button id="btn-live-drawing">Live Drawing</button>
+			</div>
+		</div>
+
+		<!-- Drawing mode container (fullscreen overlay) -->
+		<div id="drawing-container">
+			<div id="loading">Loading MediaPipe...</div>
+			<video id="webcam" autoplay playsinline></video>
+			<div id="labels-container"></div>
+			<div id="reset-overlay">
+				<div id="reset-circle-left"></div>
+				<div id="reset-circle-right"></div>
+			</div>
+			<div id="confirm-overlay">
+				<div id="confirm-circle-left"></div>
+				<div id="confirm-circle-right"></div>
+			</div>
+			<button id="btn-exit-drawing">Exit Drawing</button>
+		</div>
+
+		<!-- Drawing mode script -->
+		<script type="module">
+			import { startDrawingMode, stopDrawingMode } from './js/drawing/drawing.js';
+
+			document.getElementById('btn-live-drawing').addEventListener('click', async () => {
+				telidon = [];
+				liveDrawingActive = true; // block slideshow while drawing
+				stopSlideshow();
+				const container = document.getElementById('drawing-container');
+				container.classList.add('active');
+				await startDrawingMode(container);
+			});
+
+			document.getElementById('btn-exit-drawing').addEventListener('click', () => {
+				stopDrawingMode();
+				const container = document.getElementById('drawing-container');
+				container.classList.remove('active');
+				liveDrawingActive = false;
+				loop(); // refresh the main canvas (handles exit with no strokes drawn)
+			});
+		</script>
+	</body>
+
+</html>

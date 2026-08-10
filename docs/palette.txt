@@ -1,0 +1,17 @@
+black        (0, 0, 0)           0x000000
+gray1        (32, 32, 32)        0x202020
+gray2        (64, 64, 64)        0x404040
+gray3        (96, 96, 96)        0x606060
+gray4        (128, 128, 128)     0x808080
+gray5        (160, 160, 160)     0xA0A0A0
+gray6        (192, 192, 192)     0xC0C0C0
+gray7        (224, 224, 224)     0xE0E0E0
+blue         (0, 0, 255)         0x0000FF
+blue_magenta (180, 0, 252)       0xB400FC
+pinkish_red  (252, 0, 144)       0xFC0090
+orange_red   (252, 72, 0)        0xFC4800
+yellow       (255, 255, 0)       0xFFFF00
+yellow_green (72, 252, 0)        0x48FC00
+greenish     (0, 252, 144)       0x00FC90
+bluegreen    (0, 180, 252)       0x00B4FC
+white        (255, 255, 255)     0xFFFFFF
