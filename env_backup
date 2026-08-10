@@ -4,3 +4,16 @@ CERT_PATH=temp
 PORT_HTTP=8080
 PORT_HTTPS=3000
 PORT_WS=8090
+
+# Tezos (all optional -- these are the defaults compiled into app.js)
+TEZOS_CONTRACT=KT1DypSEV87pwiw6swdYqhDKWRBZ7xfqeS3c
+TEZOS_NETWORK=shadownet
+TEZOS_RPC=https://rpc.shadownet.teztnets.com
+TZKT_BASE=https://api.shadownet.tzkt.io/v1
+TEZOS_EXPLORER=https://shadownet.tzkt.io
+TEZOS_MAX_BYTES=30000
+TEZOS_POLL_SECONDS=30
+
+# Headless minting, off unless set. Also needs:
+#   npm install @taquito/taquito @taquito/signer
+#TEZOS_SECRET_KEY=edsk...

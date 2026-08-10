@@ -1,34 +1,15 @@
 "use strict";
 
-// ─── Configuration ────────────────────────────────────────────────────────────
-// After deploying fa2-naplps.mligo to Shadownet, paste the resulting KT1 address here.
-const CONTRACT_ADDRESS = "KT1DypSEV87pwiw6swdYqhDKWRBZ7xfqeS3c";
-
-const TZKT_BASE     = "https://api.shadownet.tzkt.io/v1";
-const SHADOWNET_RPC = "https://rpc.shadownet.teztnets.com";
+// ─── Wallet shim ──────────────────────────────────────────────────────────────
+// The one piece of the Tezos flow that can't move to the backend: a wallet key
+// belongs to the user, so signing happens here. Everything else -- contract
+// address, network endpoints, hex encoding, Michelson, chain reads -- lives in
+// app.js and reaches this page through NapClient (js/net/client.js).
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let _beaconClient  = null;
 let _activeAccount = null;
-
-// ─── Byte helpers ─────────────────────────────────────────────────────────────
-// Encode a NAPLPS binary string to lowercase hex for on-chain storage.
-function stringToHex(str) {
-    let hex = "";
-    for (let i = 0; i < str.length; i++) {
-        hex += str.charCodeAt(i).toString(16).padStart(2, "0");
-    }
-    return hex;
-}
-
-// Decode hex bytes from on-chain storage back to a NAPLPS binary string.
-function hexToString(hex) {
-    let str = "";
-    for (let i = 0; i < hex.length; i += 2) {
-        str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
-    }
-    return str;
-}
+let _config        = null;   // served by GET /api/config
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 function setStatus(msg, isError) {
@@ -41,7 +22,8 @@ function setStatus(msg, isError) {
 function setSize(msg, isError) {
     const el = document.getElementById("tezos-size");
     if (!el) return;
-    if (isError || parseInt(msg) > 30000) {
+    const limit = _config ? _config.maxNaplpsBytes : 30000;
+    if (isError || parseInt(msg) > limit) {
         el.style.color = "#ff6666";
         el.textContent = "size: " + msg + " ... too large";
     } else {
@@ -49,7 +31,6 @@ function setSize(msg, isError) {
         el.textContent = "size: " + msg + " ... ready to publish";
     }
 }
-
 
 function updateWalletUI() {
     const btnConnect    = document.getElementById("btn-connect");
@@ -74,6 +55,22 @@ function updateWalletUI() {
 // ─── Initialization ───────────────────────────────────────────────────────────
 async function initTezos() {
     try {
+        _config = await NapClient.getConfig();
+
+        // Drawings pushed by the backend (newly minted tokens, other clients,
+        // POSTs to /api/naplps) render as soon as they arrive.
+        NapClient.connect();
+        NapClient.onNaplps(function(message) {
+            loadTelidonFromText(message.naplps);
+            if (message.source === "chain") {
+                const link = message.link || (_config.explorerBase + "/" + _config.contract + "/operations/");
+                setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
+                          'Token #' + message.id + "</a> loaded from chain");
+            } else {
+                setStatus("Drawing received (" + (message.source || "server") + ")");
+            }
+        });
+
         // Support multiple possible UMD global names for the Beacon SDK bundle.
         const SDK = window.BeaconDapp || window.beaconDapp || window.beacon;
         if (!SDK || !SDK.DAppClient) {
@@ -83,10 +80,10 @@ async function initTezos() {
         }
 
         // Beacon SDK v4+: network must be declared at construction time.
-        // Shadownet is a custom network; specify RPC URL explicitly.
+        // Shadownet is a custom network; the RPC URL comes from the server.
         _beaconClient = new SDK.DAppClient({
             name: "NAP-XTZ",
-            network: { type: "custom", name: "shadownet", rpcUrl: SHADOWNET_RPC },
+            network: { type: "custom", name: _config.network, rpcUrl: _config.rpcUrl },
             // Disable deprecated P2P matrix relay (papers.tech servers are offline).
             enableMetrics: false,
             featuresConfig: {
@@ -115,9 +112,6 @@ async function initTezos() {
             _activeAccount = existing;
             updateWalletUI();
         }
-
-        // Try to load the latest on-chain token and render it.
-        //await loadLatestToken();
 
     } catch (e) {
         console.error("initTezos:", e);
@@ -164,6 +158,9 @@ async function disconnectWallet() {
 }
 
 // ─── Minting ──────────────────────────────────────────────────────────────────
+// The backend builds the operation and validates the payload; the wallet signs
+// it. Once it's out, the backend's watcher picks up the new token and pushes it
+// back as a message, so there's nothing to poll for here.
 async function mintCurrentNaplps() {
     console.log("[nap-xtz] mintCurrentNaplps called");
 
@@ -171,18 +168,6 @@ async function mintCurrentNaplps() {
     if (!napRaw) {
         setStatus("Load some NAPLPS graphics first", true);
         console.warn("[nap-xtz] no pendingNapRaw");
-        return;
-    }
-
-    // Tezos operations have a ~32KB hard limit. If napRaw is too large, it will time out or fail.
-    if (napRaw.length > 30000) {
-        setStatus(`NAPLPS too large (${(napRaw.length / 1024).toFixed(1)} KB). Max 30 KB. Try a simpler image.`, true);
-        console.warn("[nap-xtz] napRaw too large:", napRaw.length);
-        return;
-    }
-
-    if (CONTRACT_ADDRESS === "KT1PLACEHOLDER") {
-        setStatus("Contract not deployed — set CONTRACT_ADDRESS in tezos.js", true);
         return;
     }
 
@@ -197,119 +182,36 @@ async function mintCurrentNaplps() {
     }
 
     try {
+        setStatus("Preparing mint...");
+        const params = await NapClient.getMintParams(napRaw, _activeAccount.address);
+
         setStatus("Sending mint transaction...");
-        console.log("[nap-xtz] calling mintNaplpsToken, napRaw length:", napRaw.length);
-        const result = await mintNaplpsToken(napRaw);
+        console.log("[nap-xtz] signing mint, napRaw length:", napRaw.length);
+        const result = await _beaconClient.requestOperation({ operationDetails: params.operationDetails });
         console.log("[nap-xtz] requestOperation result:", result);
+
         setStatus("Transaction sent, waiting for confirmation...");
-        // Shadownet block time ~15 s; allow two blocks + TzKT indexing lag.
-        setTimeout(async () => {
-            await loadLatestToken();
-        }, 45000);
+        NapClient.notifyMinted(result && result.transactionHash);
     } catch (e) {
         console.error("[nap-xtz] mint error:", e);
         setStatus("Mint failed: " + (e.message || e), true);
     }
 }
 
-async function mintNaplpsToken(napRaw) {
-    const ownerAddress = _activeAccount.address;
-    const hexBytes     = stringToHex(napRaw);
-
-    // Michelson JSON for the "mint" entrypoint parameter.
-    // LIGO sorts record fields alphabetically, so the compiled type is:
-    //   mint (pair (map %metadata string bytes) (address %to_))
-    // i.e. metadata first, to_ second.
-    const mintValue = {
-        prim: "Pair",
-        args: [
-            [
-                {
-                    prim: "Elt",
-                    args: [
-                        { string: "naplps" },
-                        { bytes: hexBytes }
-                    ]
-                }
-            ],
-            { string: ownerAddress }
-        ]
-    };
-
-    return await _beaconClient.requestOperation({
-        operationDetails: [
-            {
-                kind: "transaction",
-                destination: CONTRACT_ADDRESS,
-                amount: "0",
-                parameters: {
-                    entrypoint: "mint",
-                    value: mintValue
-                }
-            }
-        ]
-    });
-}
-
 // ─── Reading from chain ───────────────────────────────────────────────────────
+// A request to the backend, which owns the TzKT queries and the byte decoding.
 async function loadLatestToken() {
-    if (CONTRACT_ADDRESS === "KT1PLACEHOLDER") return;
     try {
         setStatus("Loading latest token from chain...");
-        const result = await readLatestNaplps();
-        if (result) {
-            const { napRaw, latestId } = result;
-            console.log("[nap-xtz] loaded from chain, NAPLPS length:", napRaw.length);
-            loadTelidonFromText(napRaw);
-            
-            // If we have an operation hash, use that as the link.
-            // Otherwise, fall back to the token view.
-            const link = `https://shadownet.tzkt.io/${CONTRACT_ADDRESS}/operations/`; //${latestId}`;
+        const token = await NapClient.getLatest();
+        console.log("[nap-xtz] loaded from chain, NAPLPS length:", token.naplps.length);
+        loadTelidonFromText(token.naplps);
 
-            setStatus(`<a href="${link}" target="_blank" style="color: inherit; text-decoration: underline;">Latest token</a> loaded from chain`);
-        } else {
-            console.log("[nap-xtz] no tokens on chain yet");
-            setStatus("No tokens on chain yet");
-        }
+        const link = token.link || "#";
+        setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
+                  "Latest token</a> loaded from chain");
     } catch (e) {
         console.warn("[nap-xtz] loadLatestToken error:", e);
         setStatus("Chain read failed — using local samples");
     }
-}
-
-async function readLatestNaplps() {
-    // 1. Fetch storage to discover next_token_id.
-    const storageResp = await fetch(
-        `${TZKT_BASE}/contracts/${CONTRACT_ADDRESS}/storage`
-    );
-    if (!storageResp.ok) throw new Error("Storage fetch failed: " + storageResp.status);
-    const storage = await storageResp.json();
-    console.log("[nap-xtz] storage:", storage);
-
-    const nextId = parseInt(storage.next_token_id || "0", 10);
-    if (isNaN(nextId) || nextId === 0) return null;
-
-    const latestId = nextId - 1;
-    console.log("[nap-xtz] fetching token_metadata key:", latestId);
-
-    // 2. Fetch the token_metadata bigmap entry for the latest token.
-    const keyResp = await fetch(
-        `${TZKT_BASE}/contracts/${CONTRACT_ADDRESS}/bigmaps/token_metadata/keys/${latestId}`
-    );
-    if (!keyResp.ok) throw new Error("Bigmap key fetch failed: " + keyResp.status);
-    const entry = await keyResp.json();
-    console.log("[nap-xtz] bigmap entry:", entry);
-
-    const hexNaplps = entry?.value?.token_info?.naplps;
-    if (!hexNaplps) {
-        console.warn("[nap-xtz] no 'naplps' key in token_info:", entry?.value?.token_info);
-        return null;
-    }
-
-    console.log("Token url: " + "https://shadownet.tzkt.io/" + entry.hash + "/" + entry.id);
-
-    return {
-        napRaw: hexToString(hexNaplps),
-        latestId: latestId
-    };
 }
