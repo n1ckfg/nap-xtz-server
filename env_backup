@@ -17,3 +17,18 @@ TEZOS_POLL_SECONDS=30
 # Headless minting, off unless set. Also needs:
 #   npm install @taquito/taquito @taquito/signer
 #TEZOS_SECRET_KEY=edsk...
+
+# Another nap-xtz server to trade drawings with, off unless set.
+#PEER_WS_URL=ws://other-host:8090
+#PEER_RETRY_SECONDS=2
+
+# Raspberry Pi running Pinopticon, off unless RPI_HOST is set. Slideshow frames
+# go to it as they're drawn; its camera data comes back as "rpi" messages.
+#RPI_HOST=nfg-rpi-3-4.local
+#RPI_PORT=7112
+#RPI_STREAM_PORT=7111
+# How a drawing is framed for the Pi:
+#   json   (default) {"type":"naplps","encoding":"text","naplps":"..."}
+#   base64 same envelope, NAPLPS bytes base64'd
+#   raw    the NAPLPS stream on its own, no envelope
+#RPI_NAPLPS_FORMAT=json

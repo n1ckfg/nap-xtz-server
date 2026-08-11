@@ -95,6 +95,37 @@ const NapClient = (function() {
         }
     }
 
+    // ── Raspberry Pi ──
+    // Which Pi, and whether one is even linked, is the backend's business --
+    // the page only says what it drew.
+
+    // Send a drawing to the Pi alone, without broadcasting it to other clients.
+    function sendToRpi(napRaw, source) {
+        if (!napRaw) return;
+        if (_socket) {
+            _socket.emit("rpi_naplps", { naplps: napRaw, source: source || "client" });
+        } else {
+            api("/api/rpi/naplps", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ naplps: napRaw, source: source || "client" })
+            }).catch(function(e) { console.warn("[nap-client] sendToRpi:", e.message); });
+        }
+    }
+
+    // "take_photo" saves a file on the Pi; "stream_photo" sends one back.
+    function rpiCommand(command) {
+        if (_socket) {
+            _socket.emit("rpi_command", { command: command });
+        } else {
+            api("/api/rpi/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ command: command })
+            }).catch(function(e) { console.warn("[nap-client] rpiCommand:", e.message); });
+        }
+    }
+
     return {
         getConfig: getConfig,
         getLatest: getLatest,
@@ -103,7 +134,9 @@ const NapClient = (function() {
         notifyMinted: notifyMinted,
         connect: connect,
         onNaplps: onNaplps,
-        publish: publish
+        publish: publish,
+        sendToRpi: sendToRpi,
+        rpiCommand: rpiCommand
     };
 
 })();

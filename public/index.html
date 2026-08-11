@@ -251,6 +251,12 @@
 			            recording = true;
 						setSize(e2.target.result.length);
 						loop(); // new content to animate — restart the draw loop
+						// While the slideshow runs, every frame we draw also goes
+						// out to the Raspberry Pi. The backend owns that link, so
+						// this is a no-op when no Pi is configured.
+						if (slideshowActive && window.NapClient) {
+							NapClient.sendToRpi(e2.target.result, "slideshow");
+						}
 			        }
 			        reader.readAsText(new Blob(response), 'UTF-8');
 			    });

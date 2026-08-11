@@ -289,8 +289,38 @@ function startWatcher() {
 // on chain, posted to the REST API, or drawn live in a connected client.
 // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
 
+// Every message carries an id. Servers linked in both directions -- or in a
+// ring -- would otherwise hand the same drawing back and forth forever, since a
+// message arriving from a peer looks like any other client's.
+const SERVER_ID = crypto.randomUUID().slice(0, 8);
+const MAX_SEEN = 500;
+let messageCounter = 0;
+const seenOrder = [];              // ids, oldest first
+const seenIds = new Set();
+
+function nextMessageId() {
+    return SERVER_ID + "-" + (++messageCounter);
+}
+
+// Records the id and reports whether it had already been through here.
+function alreadySeen(mid) {
+    if (!mid) return false;
+    if (seenIds.has(mid)) return true;
+
+    seenIds.add(mid);
+    seenOrder.push(mid);
+    if (seenOrder.length > MAX_SEEN) seenIds.delete(seenOrder.shift());
+    return false;
+}
+
 function broadcast(type, payload, exceptSocket) {
     const message = Object.assign({ type: type, at: Date.now() }, payload);
+
+    // A relayed message keeps the id it arrived with, so it stays recognisable
+    // wherever it travels next.
+    if (!message.mid) message.mid = nextMessageId();
+    alreadySeen(message.mid);
+
     const encoded = JSON.stringify(message);
 
     // socket.io: a generic "message" event plus a per-type one for convenience.
@@ -307,7 +337,213 @@ function broadcast(type, payload, exceptSocket) {
         if (client !== exceptSocket && client.readyState === WebSocket.OPEN) client.send(encoded);
     });
 
+    // a peer server, if one is linked (see OTHER SERVERS)
+    forwardToPeer(message);
+
     return message;
+}
+
+// ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+// OTHER SERVERS
+//
+// Two outbound links, both optional and both off unless configured, so the
+// server still runs on its own:
+//
+//   1. A peer nap-xtz server, so two installations share their drawings.
+//   2. A Raspberry Pi running Pinopticon (openFrameworks), which sends camera
+//      data in and takes NAPLPS drawings out.
+//
+// Both are connections we open; the inbound side is still the ws/socket.io
+// servers above. See rpi-client.js for the Pinopticon protocol's quirks.
+// ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+
+const { RpiClient } = require("./rpi-client");
+
+const PEER = {
+    // e.g. ws://other-host:8090 -- blank leaves the peer link switched off.
+    url:        process.env.PEER_WS_URL || "",
+    retryDelay: parseInt(process.env.PEER_RETRY_SECONDS || "2", 10) * 1000
+};
+
+const RPI = {
+    // e.g. nfg-rpi-3-4.local -- blank leaves the Pi link switched off.
+    host:       process.env.RPI_HOST || "",
+    port:       parseInt(process.env.RPI_PORT || "7112", 10),
+    streamPort: parseInt(process.env.RPI_STREAM_PORT || "7111", 10),
+    // How a drawing is framed for the Pi: json | base64 | raw (see rpiNaplpsFrame).
+    naplpsFormat: String(process.env.RPI_NAPLPS_FORMAT || "json").toLowerCase(),
+    // A drawing sent to the Pi is not going into a Tezos operation, so the
+    // ~32 KB mint ceiling doesn't apply -- plenty of the .nap files the
+    // slideshow plays are larger than that. This is only a sanity bound.
+    maxBytes: parseInt(process.env.RPI_MAX_BYTES || "1000000", 10)
+};
+
+// Same shape as checkNaplps, against the Pi's limit rather than the chain's.
+function checkNaplpsForRpi(napRaw) {
+    if (typeof napRaw !== "string" || napRaw.length === 0) return "NAPLPS payload missing or empty";
+    if (napRaw.length > RPI.maxBytes) {
+        return "NAPLPS too large for the RPi link (" + (napRaw.length / 1024).toFixed(1) + " KB). Max " +
+               (RPI.maxBytes / 1024).toFixed(1) + " KB.";
+    }
+    return null;
+}
+
+// ─── Peer server ──────────────────────────────────────────────────────────────
+let peerSocket = null;
+
+function connectToPeer() {
+    if (!PEER.url) return;
+
+    const peer = new WebSocket(PEER.url);
+
+    // ws always emits 'close' after 'error', so both handlers fire on a failed
+    // attempt. Without this guard each failure would schedule two retries, and
+    // the retry rate would double every cycle.
+    let retryScheduled = false;
+    function retry(reason) {
+        if (retryScheduled) return;
+        retryScheduled = true;
+        peerSocket = null;
+        console.log("[peer] " + reason + ", retrying in " + (PEER.retryDelay / 1000) + "s...");
+        setTimeout(connectToPeer, PEER.retryDelay);
+    }
+
+    peer.on("open", function() {
+        peerSocket = peer;
+        console.log("[peer] connected to " + PEER.url);
+        // Hand the peer whatever is current, the same as a browser gets.
+        if (latestToken) {
+            peer.send(JSON.stringify({
+                type: "naplps", at: Date.now(), source: "chain", mid: nextMessageId(),
+                id: latestToken.id, link: latestToken.link, naplps: latestToken.naplps
+            }));
+        }
+    });
+
+    peer.on("message", function(data) {
+        let payload;
+        try {
+            payload = JSON.parse(data.toString());
+        } catch (e) {
+            console.log("[peer] " + data.toString().slice(0, 120));
+            return;
+        }
+        if (payload.type !== "naplps") return;
+        if (alreadySeen(payload.mid)) return;   // already been round this way
+        if (checkNaplps(payload.naplps)) return;
+
+        // Tagging it "peer" is what keeps broadcast() from sending it back.
+        broadcast("naplps", {
+            source: "peer", mid: payload.mid,
+            id: payload.id, link: payload.link, naplps: payload.naplps
+        });
+    });
+
+    peer.on("error", function() { retry("connection failed"); });
+    peer.on("close", function() { retry("disconnected"); });
+}
+
+// Drawings we originate go to the peer as well; ones that arrived *from* the
+// peer don't, since it already has them.
+function forwardToPeer(message) {
+    if (!peerSocket || peerSocket.readyState !== WebSocket.OPEN) return;
+    if (message.type !== "naplps" || message.source === "peer") return;
+    peerSocket.send(JSON.stringify(message));
+}
+
+// ─── Raspberry Pi ─────────────────────────────────────────────────────────────
+const rpi = RPI.host
+    ? new RpiClient({ host: RPI.host, port: RPI.port, streamPort: RPI.streamPort })
+    : null;
+
+// Camera data reaches the browser the same way drawings do -- as a message.
+// The Pi's own frame type becomes 'event', since 'type' names the transport.
+function relayFromRpi(event, payload) {
+    broadcast("rpi", Object.assign({ source: "rpi", event: event }, payload));
+}
+
+function startRpi() {
+    if (!rpi) return;
+
+    rpi.on("open",         function()      { console.log("[rpi] connected to " + rpi.url); });
+    rpi.on("close",        function(code)  { console.log("[rpi] disconnected (" + code + ")"); });
+    rpi.on("error",        function(err)   { console.log("[rpi] error: " + err.message); });
+    rpi.on("reconnecting", function(delay) { console.log("[rpi] retrying in " + delay + "ms..."); });
+
+    rpi.on("photo_saved", function(msg) {
+        const url = rpi.photoUrl(msg.filename);
+        console.log("[rpi] saved photo: " + url);
+        relayFromRpi("photo_saved", { hostname: msg.hostname, url: url });
+    });
+
+    rpi.on("photo", function(msg) {
+        console.log("[rpi] photo: " + msg.jpeg.length + " bytes from " + msg.hostname);
+        relayFromRpi("photo", { hostname: msg.hostname, jpeg: msg.jpeg.toString("base64") });
+    });
+
+    rpi.on("video", function(msg) {
+        relayFromRpi("video", { hostname: msg.hostname, jpeg: msg.jpeg.toString("base64") });
+    });
+
+    // Vision data passes through as it comes, minus the Pi's own 'type' field.
+    ["blob", "pixel", "contour"].forEach(function(event) {
+        rpi.on(event, function(msg) {
+            const payload = Object.assign({}, msg);
+            delete payload.type;
+            relayFromRpi(event, payload);
+        });
+    });
+
+    rpi.on("unknown", function(msg) {
+        console.log("[rpi] unrecognized frame: " + msg.raw.slice(0, 120));
+    });
+
+    console.log("\n[rpi] linking to " + rpi.url);
+    rpi.connect();
+}
+
+// One drawing, framed for the Pi. Pinopticon only acts on the text it knows
+// ("take_photo"/"stream_photo") and logs anything else, so an unfamiliar frame
+// is safe to send whichever shape it takes.
+function rpiNaplpsFrame(napRaw, source) {
+    // raw: the NAPLPS stream alone, for a receiver that wants no envelope.
+    if (RPI.naplpsFormat === "raw") return napRaw;
+
+    const useBase64 = RPI.naplpsFormat === "base64";
+
+    return JSON.stringify({
+        type: "naplps",
+        source: source || "server",
+        bytes: napRaw.length,
+        // NAPLPS is a 7-bit-safe format, so its bytes survive a JSON string
+        // intact. base64 is there for payloads that use the high half anyway,
+        // and matches how the Pi sends its own binary (photo/video/points).
+        encoding: useBase64 ? "base64" : "text",
+        naplps: useBase64 ? Buffer.from(napRaw, "latin1").toString("base64") : napRaw
+    });
+}
+
+function sendNaplpsToRpi(napRaw, source) {
+    if (!rpi) return false;
+
+    const sent = rpi.send(rpiNaplpsFrame(napRaw, source));
+    if (sent) {
+        console.log("[rpi] sent NAPLPS (" + napRaw.length + " bytes, " + (source || "server") + ")");
+    } else {
+        console.log("[rpi] offline, dropped NAPLPS (" + napRaw.length + " bytes)");
+    }
+    return sent;
+}
+
+// Commands ofApp::onWebSocketFrameReceivedEvent() acts on.
+const RPI_COMMANDS = ["take_photo", "stream_photo"];
+
+function sendCommandToRpi(command) {
+    if (!rpi || RPI_COMMANDS.indexOf(command) < 0) return false;
+
+    const sent = rpi.send(command);
+    if (!sent) console.log("[rpi] offline, dropped \"" + command + "\"");
+    return sent;
 }
 
 // ~ ~ ~ ~
@@ -350,7 +586,9 @@ app.get("/api/config", async function(req, res) {
         explorerBase: TEZOS.explorerBase,
         maxNaplpsBytes: TEZOS.maxNaplpsBytes,
         serverSigning: (await getToolkit()) !== null,
-        wsPort: port_ws
+        wsPort: port_ws,
+        // So the page knows whether sending a drawing onward is worth the trip.
+        rpiEnabled: rpi !== null
     });
 });
 
@@ -361,7 +599,15 @@ app.get("/api/health", function(req, res) {
         network: TEZOS.networkName,
         latestTokenId: latestToken ? latestToken.id : null,
         socketClients: io.engine ? io.engine.clientsCount : 0,
-        wsClients: ws.clients.size
+        wsClients: ws.clients.size,
+        peer: {
+            url: PEER.url || null,
+            connected: peerSocket !== null && peerSocket.readyState === WebSocket.OPEN
+        },
+        rpi: {
+            url: rpi ? rpi.url : null,
+            connected: rpi !== null && rpi.connected
+        }
     });
 });
 
@@ -469,6 +715,42 @@ app.post("/api/naplps", function(req, res) {
     res.json({ ok: true, at: message.at, bytes: napRaw.length });
 });
 
+// ─── Raspberry Pi ─────────────────────────────────────────────────────────────
+
+app.get("/api/rpi/status", function(req, res) {
+    res.json({
+        enabled: rpi !== null,
+        connected: rpi !== null && rpi.connected,
+        url: rpi ? rpi.url : null,
+        naplpsFormat: RPI.naplpsFormat
+    });
+});
+
+// Send one drawing to the Pi -- and only to the Pi. This is the slideshow's
+// route: those frames are already on the client's canvas, so broadcasting them
+// to every other client would be a round trip to nowhere.
+app.post("/api/rpi/naplps", function(req, res) {
+    const napRaw = req.body && req.body.naplps;
+
+    const problem = checkNaplpsForRpi(napRaw);
+    if (problem) return res.status(400).json({ error: problem });
+    if (!rpi) return res.status(501).json({ error: "No RPi configured. Set RPI_HOST in .env." });
+
+    const sent = sendNaplpsToRpi(napRaw, (req.body && req.body.source) || "api");
+    res.json({ ok: true, sent: sent, bytes: napRaw.length });
+});
+
+app.post("/api/rpi/command", function(req, res) {
+    const command = req.body && req.body.command;
+
+    if (RPI_COMMANDS.indexOf(command) < 0) {
+        return res.status(400).json({ error: "Unknown command. Try: " + RPI_COMMANDS.join(", ") });
+    }
+    if (!rpi) return res.status(501).json({ error: "No RPi configured. Set RPI_HOST in .env." });
+
+    res.json({ ok: true, sent: sendCommandToRpi(command) });
+});
+
 // ~ ~ ~ ~
 
 if (secure) {
@@ -512,6 +794,22 @@ io.on("connection", function(socket) {
         }
         broadcast("naplps", { source: payload.source || "client", naplps: payload.naplps }, socket);
     });
+    //~
+    // A drawing meant for the Pi alone -- what slideshow mode sends.
+    socket.on("rpi_naplps", function(data) {
+        const payload = typeof data === "string" ? { naplps: data } : (data || {});
+        const problem = checkNaplpsForRpi(payload.naplps);
+        if (problem) {
+            socket.emit("error_message", { type: "error_message", error: problem });
+            return;
+        }
+        sendNaplpsToRpi(payload.naplps, payload.source || "client");
+    });
+    //~
+    // Let clients drive the Pi's camera.
+    socket.on("rpi_command", function(data) {
+        sendCommandToRpi(typeof data === "string" ? data : (data && data.command));
+    });
 });
 
 ws.on("connection", function(socket) {
@@ -533,23 +831,52 @@ ws.on("connection", function(socket) {
     }
     //~
     socket.onmessage = function(event) {
+        const text = String(event.data);
+
+        // Bare camera commands, as the Pinopticon clients send them.
+        if (RPI_COMMANDS.indexOf(text) >= 0) {
+            sendCommandToRpi(text);
+            return;
+        }
+
         let payload;
         try {
-            payload = JSON.parse(event.data);
+            payload = JSON.parse(text);
         } catch (e) {
-            payload = { naplps: String(event.data) };
+            payload = { naplps: text };
         }
-        if (payload.type && payload.type !== "naplps") return;
 
-        const problem = checkNaplps(payload.naplps);
+        if (payload.type === "rpi_command") {
+            sendCommandToRpi(payload.command);
+            return;
+        }
+
+        // A peer server reaches us here too, so drop anything that has already
+        // been through this server (see alreadySeen).
+        if (alreadySeen(payload.mid)) return;
+
+        const forRpiOnly = payload.type === "rpi_naplps";
+        if (payload.type && payload.type !== "naplps" && !forRpiOnly) return;
+
+        // The Pi and the chain hold drawings to different size limits.
+        const problem = forRpiOnly ? checkNaplpsForRpi(payload.naplps) : checkNaplps(payload.naplps);
         if (problem) {
             socket.send(JSON.stringify({ type: "error_message", error: problem }));
             return;
         }
-        broadcast("naplps", { source: payload.source || "client", naplps: payload.naplps }, socket);
+
+        if (forRpiOnly) {
+            sendNaplpsToRpi(payload.naplps, payload.source || "client");
+            return;
+        }
+        broadcast("naplps", {
+            source: payload.source || "client", mid: payload.mid, naplps: payload.naplps
+        }, socket);
     };
 });
 
 // ~ ~ ~ ~
 
 startWatcher();
+connectToPeer();
+startRpi();
