@@ -172,13 +172,27 @@ must contain `gesture_recognizer.task`.
 
 ## Build status
 
-**This project has not been built on this machine.** `config.make` carries the
-project-local link flags — the `$ORIGIN` rpath, and the Poco libraries that
-`ofxPoco` fails to contribute on `linuxaarch64` — but the five compile fixes in
-`REPORT_2.md` are still unapplied and live in shared trees (`ofxIO`, `ofxHTTP`,
-`ofxCrypto`, and openFrameworks' own `ofTypes.h`).
+**Builds and runs on this machine.** The five compile fixes from `REPORT_2.md`
+are applied, and the Poco link flags sit in this project's `config.make` rather
+than in `ofxPoco/addon_config.mk`, so an openFrameworks reinstall cannot quietly
+undo them. The fixes themselves live in shared trees and are *not* carried by
+this repo:
 
-Every file in `src/` has been checked with `g++ -fsyntax-only` against the real
-include paths and compiles clean, `ofApp.cpp` included — that one verified
-against patched copies of the two offending addon headers, so the app's own code
-is known good and only the addon fixes stand between here and a build.
+| Where | What |
+| --- | --- |
+| `ofxIO` `ThreadsafeLoggerChannel.{h,cpp}` | dropped the two `log()` overrides OF no longer declares |
+| `ofxHTTP` `BaseRoute.h` | added `<queue>` and `<mutex>` |
+| `ofxHTTP` `PostRoute.cpp`, `ofxIO` `JSONUtils.cpp` | `std::filesystem::extension(p)` becomes `path(p).extension()` |
+| `ofxCrypto` `ofxCrypto.cpp` | qualified the bare `ostringstream`/`istringstream`/`stringstream` |
+| openFrameworks `types/ofTypes.h` | added `<memory>` |
+
+The first four are in `n1ckfg` forks and can go upstream. The `ofTypes.h` one is
+OF's own code and will need reapplying after a reinstall.
+
+Both network directions are verified against a real `ws` server. The app
+completes the handshake, receives a broadcast drawing and decodes it — a sent
+`wast.nap` arrives as 206 commands, distinct from the 173-command startup
+sample — and `n` publishes the same 11215 bytes back unchanged, so the NAPLPS
+survives the JSON round trip intact. MediaPipe loads its gesture model, and
+`VideoSource` falls back to a synthetic feed when it finds no camera, which is
+what makes the app testable headless under Xvfb.

@@ -2,6 +2,10 @@
 
 **System:** Raspberry Pi, Debian 12 (bookworm), Linux 6.12.96 aarch64, GCC 12, openFrameworks 0.12.1 (`of_v0.12.1_linuxaarch64_release`)
 
+## Status
+
+**Resolved.** All five compile fixes below and the Poco link flags are applied, and the project now builds, links, and runs on this machine. See the build-status section of `ARCHITECTURE.md` for where each fix landed and what survives an openFrameworks reinstall.
+
 ## Summary
 
 The client has never been built on this machine — there is no `obj/` tree and no binary. Running the build and probing past each failure in turn shows that the project's **own code is fine**: `src/ofApp.cpp` and `src/main.cpp` compile clean once the addons are fixed. Every blocker lives in the vendored addons plus one openFrameworks core header.
