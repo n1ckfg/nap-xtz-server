@@ -10,7 +10,8 @@
 #include "ofxJSONElement.h"
 #include "ofxCrypto.h"
 
-
+#include "DrawingMode.h"
+#include "NapClient.h"
 
 // The largest drawing the player will accept over a websocket, matching
 // RPI_MAX_BYTES on the server. ofxHTTP defaults its websocket buffer to 8 KB,
@@ -30,8 +31,15 @@ class ofApp : public ofBaseApp {
         void setup();
         void update();
         void draw();
+        void exit();
 
         void keyPressed(int key);
+        void keyReleased(int key);
+        void mouseMoved(int x, int y);
+        void mouseDragged(int x, int y, int button);
+        void mousePressed(int x, int y, int button);
+        void mouseReleased(int x, int y, int button);
+        void mouseScrolled(int x, int y, float scrollX, float scrollY);
         void windowResized(int w, int h);
         void dragEvent(ofDragInfo dragInfo);
 
@@ -42,9 +50,9 @@ class ofApp : public ofBaseApp {
 
         Naplps naplps;   // the decoder,  ported from naplps.js
         Telidon telidon; // the renderer, ported from TelidonP5.js
-	
-		ofFbo fbo;
-	
+
+        ofFbo fbo;
+
         std::vector<std::string> samples;
         int sampleIndex;
 
@@ -62,11 +70,64 @@ class ofApp : public ofBaseApp {
         void updateInfoText();
 
         // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
-        // NETWORK
+        // LIVE DRAWING
         //
-        // nap-xtz-server opens a websocket to this app and pushes drawings as
-        // its own canvas draws them -- slideshow mode sends every frame it
-        // plays. See that project's OTHER SERVERS section in app.js.
+        // The port of the browser's live drawing overlay. It runs instead of the
+        // NAPLPS canvas rather than over it: there is one window here, and the
+        // two views never made sense at once.
+        // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+
+        DrawingMode drawingMode;
+
+        void enterDrawingMode();
+        void leaveDrawingMode();
+
+        // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+        // SLIDESHOW
+        //
+        // Ported from index.html: plays a random .nap from bin/data on an
+        // interval. Loading anything deliberately, or entering live drawing,
+        // takes over from it.
+        // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+
+        void startSlideshow();
+        void stopSlideshow();
+        void loadRandomNap();
+
+        bool slideshowActive;
+        float slideshowInterval; // seconds
+        float lastSlideTime;
+
+        /// The browser's slideshow pushes every frame it plays to the Pi. This
+        /// app may itself be the Pi that nap-xtz-server pushes to, in which case
+        /// doing the same would feed drawings straight back to us -- so it is
+        /// off unless deliberately turned on.
+        bool sendSlideshowToRpi;
+
+        // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+        // NETWORK (OUTBOUND) -- the port of js/net/client.js
+        //
+        // Connects out to nap-xtz-server: receives drawings from every other
+        // client, publishes the ones made here, and reaches the chain through
+        // the server's REST API.
+        // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+
+        NapClient client;
+
+        /// The drawing currently on screen, kept so it can be published or
+        /// minted. The browser calls this window.pendingNapRaw.
+        std::string pendingNapRaw;
+
+        void publishCurrent();
+        void mintCurrent();
+
+        // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+        // NETWORK (INBOUND)
+        //
+        // nap-xtz-server also opens a websocket *to* this app and pushes
+        // drawings as its own canvas draws them. Both directions are live at
+        // once: this app is a client of the server and, at the same time, the
+        // Pinopticon player the server pushes to.
         // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
 
         // One drawing lifted out of a websocket frame. nap is empty when the

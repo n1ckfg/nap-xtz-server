@@ -140,3 +140,17 @@ OF_ROOT = ../../..
 ################################################################################
 # PROJECT_CXX = 
 # PROJECT_CC = 
+
+# ~ ~ ~ project-local link flags ~ ~ ~
+#
+# -rpath $ORIGIN: ofxMediaPipe links a prebuilt libmediapipe_tasks_vision.so,
+# which sits next to the binary in bin/. Without this the loader won't find it.
+#
+# The Poco libraries: ofxPoco's addon_config.mk has sections for linux64,
+# linuxarmv6l and linuxarmv7l but not linuxaarch64, so on 64-bit Pi OS it
+# contributes no ADDON_LDFLAGS at all and the link fails with undefined Poco
+# symbols (see REPORT_2.md, section A). Setting them here rather than editing
+# ofxPoco means the fix survives reinstalling openFrameworks.
+PROJECT_LDFLAGS = -Wl,-rpath,'$$ORIGIN'
+PROJECT_LDFLAGS += -lPocoNetSSL -lPocoNet -lPocoCrypto -lPocoUtil
+PROJECT_LDFLAGS += -lPocoJSON -lPocoXML -lPocoFoundation -lcrypto -lssl

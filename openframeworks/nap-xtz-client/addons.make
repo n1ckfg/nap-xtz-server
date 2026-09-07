@@ -1,3 +1,4 @@
+ofxMediaPipe
 ofxNaplps
 ofxHTTP
 ofxIO
