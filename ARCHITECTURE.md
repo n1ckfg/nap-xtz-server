@@ -31,7 +31,7 @@ Where the `ws`/`socket.io` servers above accept connections, these two are conne
 
 Every message carries a `mid` (server id + counter) and each server remembers the last 500 it has handled. Without that, two servers each pointed at the other would hand the same drawing back and forth forever, since a message arriving from a peer is indistinguishable from any other client's. The id also means a drawing is delivered once rather than once per path.
 
-**Raspberry Pi** (`RPI_HOST`, e.g. `nfg-rpi-3-4.local`) — a Pi running Pinopticon (openFrameworks / ofxHTTP). Traffic runs both ways:
+**Raspberry Pi** (`RPI_HOST`, e.g. `nfg-rpi-3-4.local`) — a Pi running PiNaplpsPlayer or PiNaplpsDrawer (openFrameworks / ofxHTTP). Traffic runs both ways:
 
 - *In*: camera and vision frames (`photo`, `photo_saved`, `video`, `blob`, `pixel`, `contour`) are relayed to connected clients as `{ type: "rpi", source: "rpi", event, ... }`. The Pi's own frame type becomes `event`, since `type` names the transport.
 - *Out*: NAPLPS drawings, and the two commands the Pi acts on (`take_photo`, `stream_photo`).
