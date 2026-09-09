@@ -266,6 +266,11 @@ async function pollChain() {
             latestToken = token;
             console.log("[tezos] new token #" + id + " (" + token.naplps.length + " bytes)");
             broadcast("naplps", { source: "chain", id: token.id, link: token.link, naplps: token.naplps });
+
+            // The Pi is not one of our clients, so the broadcast above misses
+            // it. A minted drawing goes out over the link this server holds,
+            // the same way the slideshow's frames do.
+            sendNaplpsToRpi(token.naplps, "chain");
         }
         lastSeenId = latestId;
     } catch (e) {

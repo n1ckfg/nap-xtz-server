@@ -17,7 +17,7 @@ The Node.js backend handles HTTP requests (Express) and real-time communication 
 
 ### Key Responsibilities
 
-1. **Tezos Chain Watcher**: Polls the smart contract's `token_metadata` bigmap (defaulting to the Shadownet contract) using the TzKT API. Decodes hex payloads into NAPLPS bytes and broadcasts new tokens to all connected clients.
+1. **Tezos Chain Watcher**: Polls the smart contract's `token_metadata` bigmap (defaulting to the Shadownet contract) using the TzKT API. Decodes hex payloads into NAPLPS bytes, broadcasts new tokens to all connected clients, and sends them on to the Raspberry Pi.
 2. **Message Broker**: Manages a unified fanout system across `socket.io` and raw `ws` connections. Drawings travel as JSON messages (`{ type: "naplps", source, naplps, ... }`) whether they are minted on-chain, posted via the REST API, or drawn live.
 3. **Transaction Preparation**: Builds the `mint` entrypoint Michelson parameter payload to hand off to the frontend for signing.
 4. **Headless Minting (Optional)**: If `TEZOS_SECRET_KEY` is provided in `.env`, the server can sign and submit mint operations directly using `@taquito/taquito`.
@@ -34,7 +34,7 @@ Every message carries a `mid` (server id + counter) and each server remembers th
 **Raspberry Pi** (`RPI_HOST`, e.g. `nfg-rpi-3-4.local`) — a Pi running PiNaplpsPlayer or PiNaplpsDrawer (openFrameworks / ofxHTTP). Traffic runs both ways:
 
 - *In*: camera and vision frames (`photo`, `photo_saved`, `video`, `blob`, `pixel`, `contour`) are relayed to connected clients as `{ type: "rpi", source: "rpi", event, ... }`. The Pi's own frame type becomes `event`, since `type` names the transport.
-- *Out*: NAPLPS drawings, and the two commands the Pi acts on (`take_photo`, `stream_photo`).
+- *Out*: NAPLPS drawings, and the two commands the Pi acts on (`take_photo`, `stream_photo`). Newly minted drawings go out this way on their own: the Pi is not a websocket client of ours, so the chain watcher hands each new token to the Pi as well as broadcasting it.
 
 `rpi-client.js` holds the connection and the protocol's quirks — notably that sending a websocket PING frame drops the connection, so liveness is TCP-level keepalive instead. `RPI_NAPLPS_FORMAT` selects how a drawing is framed for the Pi: `json` (default), `base64`, or `raw`.
 
