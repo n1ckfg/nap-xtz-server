@@ -993,10 +993,8 @@ function animateLoop() {
                     obj.material.opacity = 1;
                 }
             } else {
-                // Double Button A = exit drawing mode
-                stopDrawingMode();
-                const container = window._drawingContainer;
-                if (container) container.classList.remove('active');
+                // Double Button A = mint the drawing to Tezos
+                mintDrawing();
             }
         }
     }
@@ -1173,16 +1171,20 @@ export function stopDrawingMode() {
     });
 }
 
+// Encodes the current frame to NAPLPS and loads it into the main canvas.
+// Returns the encoded bytes, or null if there was nothing to encode -- the
+// mint gesture needs to tell an empty frame from a stale window.pendingNapRaw
+// left behind by whatever was on the canvas before.
 function convertToNAPLPS() {
     if (!frame || !frame.strokes || frame.strokes.length === 0) {
         console.log('No strokes to convert');
-        return;
+        return null;
     }
 
     // NapInputWrapper, NapEncoder, Vector2, Vector3 are global (from naplps.js)
     if (typeof window.NapInputWrapper === 'undefined' || typeof window.NapEncoder === 'undefined') {
         console.error('NapInputWrapper or NapEncoder not available');
-        return;
+        return null;
     }
 
     const input = [];
@@ -1238,7 +1240,7 @@ function convertToNAPLPS() {
 
     if (input.length === 0) {
         console.log('No valid strokes to encode');
-        return;
+        return null;
     }
 
     // Encode to NAPLPS
@@ -1252,5 +1254,34 @@ function convertToNAPLPS() {
     }
 
     console.log(`Converted ${input.length} strokes to NAPLPS`);
+    return encoder.napRaw;
+}
+
+// ── Mint gesture (double thumbs-up) ──
+// Drawing mode stays up: the strokes are encoded as they stand and handed to
+// the wallet shim in js/tezos/tezos.js, which owns signing. The Beacon popup
+// renders outside #drawing-container, so the system cursor (hidden inside it,
+// see main.css) comes back for the wallet prompt.
+let mintInFlight = false;
+
+async function mintDrawing() {
+    if (mintInFlight) return; // a held gesture shouldn't stack wallet prompts
+
+    const napRaw = convertToNAPLPS();
+    if (!napRaw) {
+        console.warn('[nap-xtz] nothing to mint - draw something first');
+        return;
+    }
+    if (typeof window.mintCurrentNaplps !== 'function') {
+        console.error('[nap-xtz] mintCurrentNaplps not available');
+        return;
+    }
+
+    mintInFlight = true;
+    try {
+        await window.mintCurrentNaplps();
+    } finally {
+        mintInFlight = false;
+    }
 }
 

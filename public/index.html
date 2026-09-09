@@ -528,6 +528,11 @@
 		}
 		window.toggleUI = toggleUI;
 
+		function setUIHidden(hidden) {
+			document.body.classList.toggle("ui-hidden", hidden);
+		}
+		window.setUIHidden = setUIHidden;
+
 		document.addEventListener("keydown", function(e) {
 			if (e.key !== "h" && e.key !== "H") return;
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -639,6 +644,7 @@
 				telidon = [];
 				liveDrawingActive = true; // block slideshow while drawing
 				stopSlideshow();
+				setUIHidden(true); // drawing mode always starts clean, whatever "h" left behind
 				drawingContainer.classList.add('active');
 				await startDrawingMode(drawingContainer);
 			}
