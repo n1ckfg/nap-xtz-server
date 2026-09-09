@@ -355,8 +355,8 @@ function broadcast(type, payload, exceptSocket) {
 // server still runs on its own:
 //
 //   1. A peer nap-xtz server, so two installations share their drawings.
-//   2. A Raspberry Pi running Pinopticon (openFrameworks), which sends camera
-//      data in and takes NAPLPS drawings out.
+//   2. One or more Raspberry Pis running Pinopticon (openFrameworks), which
+//      send camera data in and take NAPLPS drawings out.
 //
 // Both are connections we open; the inbound side is still the ws/socket.io
 // servers above. See rpi-client.js for the Pinopticon protocol's quirks.
@@ -371,8 +371,6 @@ const PEER = {
 };
 
 const RPI = {
-    // e.g. nfg-rpi-3-4.local -- blank leaves the Pi link switched off.
-    host:       process.env.RPI_HOST || "",
     port:       parseInt(process.env.RPI_PORT || "7112", 10),
     streamPort: parseInt(process.env.RPI_STREAM_PORT || "7111", 10),
     // How a drawing is framed for the Pi: json | base64 | raw (see rpiNaplpsFrame).
@@ -382,6 +380,30 @@ const RPI = {
     // slideshow plays are larger than that. This is only a sanity bound.
     maxBytes: parseInt(process.env.RPI_MAX_BYTES || "1000000", 10)
 };
+
+// RPI_HOST names one Pi or several, comma-separated:
+//
+//   RPI_HOST=nfg-rpi-3-4.local
+//   RPI_HOST=nfg-rpi-3-4.local, nfg-rpi-3-5.local
+//   RPI_HOST=nfg-rpi-3-4.local:7112:7111, 10.0.0.9
+//
+// An entry is "host", "host:port" or "host:port:streamPort"; RPI_PORT and
+// RPI_STREAM_PORT fill in whatever an entry leaves out, so a row of identical
+// Pis needs only their names. Blank leaves the Pi link switched off.
+function parseRpiHosts(setting) {
+    return String(setting || "")
+        .split(",")
+        .map(function(entry) { return entry.trim(); })
+        .filter(function(entry) { return entry.length > 0; })
+        .map(function(entry) {
+            const parts = entry.split(":");
+            return {
+                host:       parts[0].trim(),
+                port:       parseInt(parts[1], 10) || RPI.port,
+                streamPort: parseInt(parts[2], 10) || RPI.streamPort
+            };
+        });
+}
 
 // Same shape as checkNaplps, against the Pi's limit rather than the chain's.
 function checkNaplpsForRpi(napRaw) {
@@ -457,54 +479,68 @@ function forwardToPeer(message) {
 }
 
 // ─── Raspberry Pi ─────────────────────────────────────────────────────────────
-const rpi = RPI.host
-    ? new RpiClient({ host: RPI.host, port: RPI.port, streamPort: RPI.streamPort })
-    : null;
+// One Pi or a whole row of them: each gets its own connection, every drawing
+// goes to all of them, and camera data from any of them reaches the clients.
+const rpis = parseRpiHosts(process.env.RPI_HOST).map(function(pi) { return new RpiClient(pi); });
+
+function anyRpiConnected() {
+    return rpis.some(function(client) { return client.connected; });
+}
 
 // Camera data reaches the browser the same way drawings do -- as a message.
 // The Pi's own frame type becomes 'event', since 'type' names the transport.
-function relayFromRpi(event, payload) {
-    broadcast("rpi", Object.assign({ source: "rpi", event: event }, payload));
+// `host` is the address we dialled, which is what tells two Pis apart -- a
+// frame's own `hostname` is whatever that Pi calls itself, and JSON frames
+// carry it while the plain-text ones do not.
+function relayFromRpi(client, event, payload) {
+    broadcast("rpi", Object.assign(
+        { source: "rpi", host: client.host, port: client.port, event: event }, payload));
 }
 
 function startRpi() {
-    if (!rpi) return;
+    if (!rpis.length) return;
 
-    rpi.on("open",         function()      { console.log("[rpi] connected to " + rpi.url); });
-    rpi.on("close",        function(code)  { console.log("[rpi] disconnected (" + code + ")"); });
-    rpi.on("error",        function(err)   { console.log("[rpi] error: " + err.message); });
-    rpi.on("reconnecting", function(delay) { console.log("[rpi] retrying in " + delay + "ms..."); });
+    // Each Pi reconnects on its own, so one going dark leaves the rest alone.
+    rpis.forEach(function(rpi) {
+        // host:port, not host alone -- two Pis can sit on one machine.
+        const tag = "[rpi " + rpi.host + ":" + rpi.port + "]";
 
-    rpi.on("photo_saved", function(msg) {
-        const url = rpi.photoUrl(msg.filename);
-        console.log("[rpi] saved photo: " + url);
-        relayFromRpi("photo_saved", { hostname: msg.hostname, url: url });
-    });
+        rpi.on("open",         function()      { console.log(tag + " connected to " + rpi.url); });
+        rpi.on("close",        function(code)  { console.log(tag + " disconnected (" + code + ")"); });
+        rpi.on("error",        function(err)   { console.log(tag + " error: " + err.message); });
+        rpi.on("reconnecting", function(delay) { console.log(tag + " retrying in " + delay + "ms..."); });
 
-    rpi.on("photo", function(msg) {
-        console.log("[rpi] photo: " + msg.jpeg.length + " bytes from " + msg.hostname);
-        relayFromRpi("photo", { hostname: msg.hostname, jpeg: msg.jpeg.toString("base64") });
-    });
-
-    rpi.on("video", function(msg) {
-        relayFromRpi("video", { hostname: msg.hostname, jpeg: msg.jpeg.toString("base64") });
-    });
-
-    // Vision data passes through as it comes, minus the Pi's own 'type' field.
-    ["blob", "pixel", "contour"].forEach(function(event) {
-        rpi.on(event, function(msg) {
-            const payload = Object.assign({}, msg);
-            delete payload.type;
-            relayFromRpi(event, payload);
+        rpi.on("photo_saved", function(msg) {
+            const url = rpi.photoUrl(msg.filename);
+            console.log(tag + " saved photo: " + url);
+            relayFromRpi(rpi, "photo_saved", { hostname: msg.hostname, url: url });
         });
-    });
 
-    rpi.on("unknown", function(msg) {
-        console.log("[rpi] unrecognized frame: " + msg.raw.slice(0, 120));
-    });
+        rpi.on("photo", function(msg) {
+            console.log(tag + " photo: " + msg.jpeg.length + " bytes from " + msg.hostname);
+            relayFromRpi(rpi, "photo", { hostname: msg.hostname, jpeg: msg.jpeg.toString("base64") });
+        });
 
-    console.log("\n[rpi] linking to " + rpi.url);
-    rpi.connect();
+        rpi.on("video", function(msg) {
+            relayFromRpi(rpi, "video", { hostname: msg.hostname, jpeg: msg.jpeg.toString("base64") });
+        });
+
+        // Vision data passes through as it comes, minus the Pi's own 'type' field.
+        ["blob", "pixel", "contour"].forEach(function(event) {
+            rpi.on(event, function(msg) {
+                const payload = Object.assign({}, msg);
+                delete payload.type;
+                relayFromRpi(rpi, event, payload);
+            });
+        });
+
+        rpi.on("unknown", function(msg) {
+            console.log(tag + " unrecognized frame: " + msg.raw.slice(0, 120));
+        });
+
+        console.log("\n[rpi] linking to " + rpi.url);
+        rpi.connect();
+    });
 }
 
 // One drawing, framed for the Pi. Pinopticon only acts on the text it knows
@@ -528,27 +564,28 @@ function rpiNaplpsFrame(napRaw, source) {
     });
 }
 
+// Every configured Pi gets the drawing. A Pi that is down is skipped rather
+// than holding up the others; it will show the next drawing once it is back.
 function sendNaplpsToRpi(napRaw, source) {
-    if (!rpi) return false;
+    if (!rpis.length) return false;
 
-    const sent = rpi.send(rpiNaplpsFrame(napRaw, source));
-    if (sent) {
-        console.log("[rpi] sent NAPLPS (" + napRaw.length + " bytes, " + (source || "server") + ")");
-    } else {
-        console.log("[rpi] offline, dropped NAPLPS (" + napRaw.length + " bytes)");
-    }
-    return sent;
+    const frame = rpiNaplpsFrame(napRaw, source);
+    const sent = rpis.filter(function(rpi) { return rpi.send(frame); }).length;
+
+    console.log("[rpi] " + (sent ? "sent" : "offline, dropped") + " NAPLPS (" + napRaw.length +
+                " bytes, " + (source || "server") + ") -- " + sent + "/" + rpis.length + " Pis");
+    return sent > 0;
 }
 
 // Commands ofApp::onWebSocketFrameReceivedEvent() acts on.
 const RPI_COMMANDS = ["take_photo", "stream_photo"];
 
 function sendCommandToRpi(command) {
-    if (!rpi || RPI_COMMANDS.indexOf(command) < 0) return false;
+    if (!rpis.length || RPI_COMMANDS.indexOf(command) < 0) return false;
 
-    const sent = rpi.send(command);
+    const sent = rpis.filter(function(rpi) { return rpi.send(command); }).length;
     if (!sent) console.log("[rpi] offline, dropped \"" + command + "\"");
-    return sent;
+    return sent > 0;
 }
 
 // ~ ~ ~ ~
@@ -593,7 +630,7 @@ app.get("/api/config", async function(req, res) {
         serverSigning: (await getToolkit()) !== null,
         wsPort: port_ws,
         // So the page knows whether sending a drawing onward is worth the trip.
-        rpiEnabled: rpi !== null
+        rpiEnabled: rpis.length > 0
     });
 });
 
@@ -610,8 +647,9 @@ app.get("/api/health", function(req, res) {
             connected: peerSocket !== null && peerSocket.readyState === WebSocket.OPEN
         },
         rpi: {
-            url: rpi ? rpi.url : null,
-            connected: rpi !== null && rpi.connected
+            count: rpis.length,
+            connected: anyRpiConnected(),
+            pis: rpis.map(function(rpi) { return { url: rpi.url, connected: rpi.connected }; })
         }
     });
 });
@@ -724,9 +762,13 @@ app.post("/api/naplps", function(req, res) {
 
 app.get("/api/rpi/status", function(req, res) {
     res.json({
-        enabled: rpi !== null,
-        connected: rpi !== null && rpi.connected,
-        url: rpi ? rpi.url : null,
+        enabled: rpis.length > 0,
+        // True when at least one Pi is up: a drawing sent now would land somewhere.
+        connected: anyRpiConnected(),
+        count: rpis.length,
+        pis: rpis.map(function(rpi) {
+            return { host: rpi.host, url: rpi.url, connected: rpi.connected };
+        }),
         naplpsFormat: RPI.naplpsFormat
     });
 });
@@ -739,7 +781,7 @@ app.post("/api/rpi/naplps", function(req, res) {
 
     const problem = checkNaplpsForRpi(napRaw);
     if (problem) return res.status(400).json({ error: problem });
-    if (!rpi) return res.status(501).json({ error: "No RPi configured. Set RPI_HOST in .env." });
+    if (!rpis.length) return res.status(501).json({ error: "No RPi configured. Set RPI_HOST in .env." });
 
     const sent = sendNaplpsToRpi(napRaw, (req.body && req.body.source) || "api");
     res.json({ ok: true, sent: sent, bytes: napRaw.length });
@@ -751,7 +793,7 @@ app.post("/api/rpi/command", function(req, res) {
     if (RPI_COMMANDS.indexOf(command) < 0) {
         return res.status(400).json({ error: "Unknown command. Try: " + RPI_COMMANDS.join(", ") });
     }
-    if (!rpi) return res.status(501).json({ error: "No RPi configured. Set RPI_HOST in .env." });
+    if (!rpis.length) return res.status(501).json({ error: "No RPi configured. Set RPI_HOST in .env." });
 
     res.json({ ok: true, sent: sendCommandToRpi(command) });
 });

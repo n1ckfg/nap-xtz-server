@@ -22,8 +22,15 @@ TEZOS_POLL_SECONDS=30
 #PEER_WS_URL=ws://other-host:8090
 #PEER_RETRY_SECONDS=2
 
-# Raspberry Pi running Pinopticon, off unless RPI_HOST is set. Slideshow frames
-# go to it as they're drawn; its camera data comes back as "rpi" messages.
+# Raspberry Pis running Pinopticon, off unless RPI_HOST is set. Slideshow frames
+# and newly minted drawings go out as they're drawn; camera data comes back as
+# "rpi" messages, tagged with the host it came from.
+#
+# One Pi, or several separated by commas. An entry is "host", "host:port" or
+# "host:port:streamPort"; RPI_PORT and RPI_STREAM_PORT below fill in the rest,
+# so a row of identical Pis needs only their names. Every drawing goes to all
+# of them, and one being down doesn't hold up the others.
+#   RPI_HOST=nfg-rpi-3-4.local, nfg-rpi-3-5.local, 10.0.0.9:7112:7111
 #RPI_HOST=nfg-rpi-3-4.local
 #RPI_PORT=7112
 #RPI_STREAM_PORT=7111

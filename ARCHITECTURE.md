@@ -6,7 +6,7 @@ The architecture strictly separates the **backend (blockchain synchronization & 
 
 ## High-Level Separation of Concerns
 
-- **Backend (`app.js`)**: Owns all Tezos interactions (except transaction signing). It is responsible for contract addresses, network endpoints, Michelson payload construction, chain reads, and polling for new tokens via the TzKT API. It acts as a headless server that can broadcast new drawings via WebSockets to connected clients without needing a browser open. It also owns the outbound links to other machines — a peer nap-xtz server and a Raspberry Pi — so the frontend never needs to know their addresses.
+- **Backend (`app.js`)**: Owns all Tezos interactions (except transaction signing). It is responsible for contract addresses, network endpoints, Michelson payload construction, chain reads, and polling for new tokens via the TzKT API. It acts as a headless server that can broadcast new drawings via WebSockets to connected clients without needing a browser open. It also owns the outbound links to other machines — a peer nap-xtz server and any number of Raspberry Pis — so the frontend never needs to know their addresses.
 - **Frontend (`public/`)**: A static web client that renders NAPLPS art using p5.js and provides a 3D hand-tracking live drawing mode using MediaPipe and Three.js. It holds no direct blockchain-reading logic and relies on the backend's `/api/*` and WebSocket messages. For minting, the frontend connects to the user's Tezos wallet (via Beacon SDK) to sign the transaction payloads constructed by the backend.
 
 ---
@@ -17,11 +17,11 @@ The Node.js backend handles HTTP requests (Express) and real-time communication 
 
 ### Key Responsibilities
 
-1. **Tezos Chain Watcher**: Polls the smart contract's `token_metadata` bigmap (defaulting to the Shadownet contract) using the TzKT API. Decodes hex payloads into NAPLPS bytes, broadcasts new tokens to all connected clients, and sends them on to the Raspberry Pi.
+1. **Tezos Chain Watcher**: Polls the smart contract's `token_metadata` bigmap (defaulting to the Shadownet contract) using the TzKT API. Decodes hex payloads into NAPLPS bytes, broadcasts new tokens to all connected clients, and sends them on to the Raspberry Pis.
 2. **Message Broker**: Manages a unified fanout system across `socket.io` and raw `ws` connections. Drawings travel as JSON messages (`{ type: "naplps", source, naplps, ... }`) whether they are minted on-chain, posted via the REST API, or drawn live.
 3. **Transaction Preparation**: Builds the `mint` entrypoint Michelson parameter payload to hand off to the frontend for signing.
 4. **Headless Minting (Optional)**: If `TEZOS_SECRET_KEY` is provided in `.env`, the server can sign and submit mint operations directly using `@taquito/taquito`.
-5. **Outbound Server Links (Optional)**: Connects as a client to a peer nap-xtz server and to a Raspberry Pi. Both are off unless configured, so the server still runs on its own.
+5. **Outbound Server Links (Optional)**: Connects as a client to a peer nap-xtz server and to one or more Raspberry Pis. Both are off unless configured, so the server still runs on its own.
 
 ### Outbound Server Links
 
@@ -31,10 +31,18 @@ Where the `ws`/`socket.io` servers above accept connections, these two are conne
 
 Every message carries a `mid` (server id + counter) and each server remembers the last 500 it has handled. Without that, two servers each pointed at the other would hand the same drawing back and forth forever, since a message arriving from a peer is indistinguishable from any other client's. The id also means a drawing is delivered once rather than once per path.
 
-**Raspberry Pi** (`RPI_HOST`, e.g. `nfg-rpi-3-4.local`) — a Pi running PiNaplpsPlayer or PiNaplpsDrawer (openFrameworks / ofxHTTP). Traffic runs both ways:
+**Raspberry Pis** (`RPI_HOST`, e.g. `nfg-rpi-3-4.local`) — Pis running PiNaplpsPlayer or PiNaplpsDrawer (openFrameworks / ofxHTTP). Traffic runs both ways:
 
-- *In*: camera and vision frames (`photo`, `photo_saved`, `video`, `blob`, `pixel`, `contour`) are relayed to connected clients as `{ type: "rpi", source: "rpi", event, ... }`. The Pi's own frame type becomes `event`, since `type` names the transport.
+- *In*: camera and vision frames (`photo`, `photo_saved`, `video`, `blob`, `pixel`, `contour`) are relayed to connected clients as `{ type: "rpi", source: "rpi", host, port, event, ... }`. The Pi's own frame type becomes `event`, since `type` names the transport; `host` and `port` say which Pi sent it, which a frame's own `hostname` cannot — the plain-text frames carry no hostname, and two Pis can share a machine.
 - *Out*: NAPLPS drawings, and the two commands the Pi acts on (`take_photo`, `stream_photo`). Newly minted drawings go out this way on their own: the Pi is not a websocket client of ours, so the chain watcher hands each new token to the Pi as well as broadcasting it.
+
+**Naming more than one.** `RPI_HOST` takes a comma-separated list, and each entry may be `host`, `host:port` or `host:port:streamPort`, with `RPI_PORT` and `RPI_STREAM_PORT` filling in whatever an entry omits — so a row of identical Pis needs only their names:
+
+```
+RPI_HOST=nfg-rpi-3-4.local, nfg-rpi-3-5.local, 10.0.0.9:7112:7111
+```
+
+Each Pi gets its own `RpiClient` and reconnects on its own schedule, so one being switched off neither holds up a send nor disturbs the others: a drawing goes to whichever Pis are up at that moment, and a Pi that was down shows the next one. `sent` in an API reply, and `connected` in a status reply, mean *at least one* Pi — `GET /api/rpi/status` lists them individually under `pis`.
 
 `rpi-client.js` holds the connection and the protocol's quirks — notably that sending a websocket PING frame drops the connection, so liveness is TCP-level keepalive instead. `RPI_NAPLPS_FORMAT` selects how a drawing is framed for the Pi: `json` (default), `base64`, or `raw`.
 
@@ -53,9 +61,9 @@ Note that drawings bound for the Pi are checked against `RPI_MAX_BYTES` (default
 | `POST /api/tezos/mint` | Headless server-side mint (requires `TEZOS_SECRET_KEY` and Taquito) |
 | `POST /api/tezos/minted` | Notification from client that a wallet mint was broadcast; accelerates polling |
 | `POST /api/naplps` | Broadcasts a drawing to all connected clients (no chain involved) |
-| `GET /api/rpi/status` | Whether a Pi is configured, and whether it is currently connected |
-| `POST /api/rpi/naplps` | Sends a drawing to the Pi *only* — no broadcast to other clients |
-| `POST /api/rpi/command` | Sends `take_photo` or `stream_photo` to the Pi |
+| `GET /api/rpi/status` | Which Pis are configured, and which are currently connected |
+| `POST /api/rpi/naplps` | Sends a drawing to the Pis *only* — no broadcast to other clients |
+| `POST /api/rpi/command` | Sends `take_photo` or `stream_photo` to every Pi |
 
 The same three are reachable over the sockets, for clients that already hold a connection: `rpi_naplps` and `rpi_command` on socket.io, or messages of those `type`s (and the bare command strings) on raw `ws`.
 
