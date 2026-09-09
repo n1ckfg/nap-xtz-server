@@ -292,3 +292,13 @@ a:hover {
 	font-size: 1em;
 	font-weight: bold;
 }
+/* ── UI visibility toggle (the "h" key) ──
+   The page starts with every HTML overlay hidden so the canvas fills the
+   screen on its own; pressing "h" toggles the chrome back on. The class
+   is on <body> from the markup, so nothing flashes before the first paint. */
+body.ui-hidden #container,
+body.ui-hidden #btn-exit-drawing,
+body.ui-hidden #drawing-container #loading,
+body.ui-hidden #labels-container {
+	display: none !important;
+}

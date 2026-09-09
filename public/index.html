@@ -518,6 +518,25 @@
 		}
 		window.rdpSimplify = rdpSimplify;
 
+		// ── UI visibility ──
+		// Every HTML overlay is hidden by default for a clean fullscreen view;
+		// "h" toggles it back. Listening on the document means it also works
+		// while live drawing mode has the screen (that mode's own keys are
+		// w/a/s/d, so there is no conflict).
+		function toggleUI() {
+			document.body.classList.toggle("ui-hidden");
+		}
+		window.toggleUI = toggleUI;
+
+		document.addEventListener("keydown", function(e) {
+			if (e.key !== "h" && e.key !== "H") return;
+			if (e.metaKey || e.ctrlKey || e.altKey) return;
+			// Don't swallow an "h" the user is typing into the NAPLPS field.
+			const t = e.target;
+			if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+			toggleUI();
+		});
+
 		function hexToRgb(hex) {
 				let result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
 				return result ? {
@@ -538,7 +557,8 @@
 		</script>
 	</head>
 
-	<body>
+	<!-- Starts with the UI chrome hidden (see .ui-hidden in main.css); "h" toggles it. -->
+	<body class="ui-hidden">
 		<div id="container">
 			<div class="sketch">
 				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz"><i>source</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
