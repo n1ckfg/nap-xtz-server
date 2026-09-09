@@ -85,6 +85,18 @@ class NapClient : public ofThread {
         /// GET /api/tezos/latest -- the newest drawing on chain.
         bool fetchLatest(Message & out, std::string & outError);
 
+        /// fetchLatest() on a detached thread. The drawing it finds is pushed
+        /// into the same queue as a broadcast one, so getNextMessage() delivers
+        /// it and the caller shows it exactly as it shows any other arrival.
+        /// The browser reads the chain this way too -- preload() kicks off
+        /// loadLatestToken() and the canvas sits on its placeholder until the
+        /// answer lands -- and blocking the draw loop on an HTTP round trip
+        /// would freeze the window instead.
+        void fetchLatestAsync();
+
+        enum class FetchState { Idle, Pending, Succeeded, Failed };
+        FetchState getLatestState() const { return latestState.load(); }
+
         /// Human-readable connection state for the HUD.
         std::string getStatusText() const;
 
@@ -132,6 +144,8 @@ class NapClient : public ofThread {
         mutable std::mutex outgoingMutex;
         std::deque<std::string> outgoing;
         static constexpr size_t kMaxOutgoing = 32;
+
+        std::atomic<FetchState> latestState { FetchState::Idle };
 
         mutable std::mutex mintMutex;
         MintState mintState = MintState::Idle;

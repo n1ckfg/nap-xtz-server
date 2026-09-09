@@ -174,6 +174,8 @@ void DrawingMode::updateTracking() {
         controllers[i].visible = false;
         handLabel[i].clear();
         handSubLabel[i].clear();
+        handGesture[i].clear();
+        handDepthScale[i] = 1.0f;
     }
 
     const int handCount = std::min((int)results.hands.size(), kMaxHands);
@@ -249,9 +251,26 @@ void DrawingMode::updateHand(int index, const ofxMediaPipe::Hand & hand) {
         handedness = "Left";
     }
 
+    handGesture[index] = gestureName;
+
+    // The pointer shrinks as the hand goes back, which is the only depth cue in
+    // a scene with no shadows.
+    handDepthScale[index] = std::max(0.1f, 1.0f - pointer.position.z * 2.0f);
+
     handLabel[index] = handedness + ": " + (gestureName.empty() ? "None" : gestureName);
-    handSubLabel[index] = "confidence " + ofToString(controller.getConfidence(), 2)
-        + (controller.areButtonsBlocked() ? " (blocked)" : "");
+
+    // The JS second line is the metric, wrist-centred landmark. The confidence
+    // gate is appended only while it's actually swallowing button presses,
+    // since that is otherwise invisible and looks like the app ignoring you.
+    const ofxMediaPipe::Landmark & worldTip =
+        (hand.worldLandmarks.size() > ofxMediaPipe::HandLandmarkIndex::IndexTip)
+            ? hand.worldLandmarks[ofxMediaPipe::HandLandmarkIndex::IndexTip]
+            : pointer;
+
+    handSubLabel[index] = "3D World: " + ofToString(worldTip.position.x, 2)
+        + ", " + ofToString(worldTip.position.y, 2)
+        + ", " + ofToString(worldTip.position.z, 2)
+        + (controller.areButtonsBlocked() ? "  (blocked)" : "");
 }
 
 //--------------------------------------------------------------
@@ -710,24 +729,25 @@ void DrawingMode::drawScene() {
 
         const glm::vec3 pos = controllers[i].getGlobalPosition();
 
-        // Colour echoes the gesture, so the classifier's reading is visible
-        // before it does anything irreversible.
+        // Colour echoes the gesture the classifier is reading *this frame*, not
+        // the latched button. A fist reads red and an open palm green, so the
+        // grab and the release are both visible before either takes effect.
         ofColor sphereColor(255);
-        if (controllers[i].grip_Held) {
+        if (handGesture[i] == "Closed_Fist") {
             sphereColor = ofColor(255, 0, 0);
-        } else if (controllers[i].trigger_Held) {
+        } else if (handGesture[i] == "Open_Palm") {
             sphereColor = ofColor(0, 255, 0);
         }
 
         ofSetColor(sphereColor);
-        ofDrawSphere(pos, 0.2f);
+        ofDrawSphere(pos, 0.2f * handDepthScale[i]);
 
         ofPushStyle();
         ofDisableDepthTest();
         ofNoFill();
         ofSetLineWidth(3.0f);
         ofSetColor(controllerDrawColor[i]);
-        ofDrawCircle(pos, 0.25f);
+        ofDrawCircle(pos, 0.25f * handDepthScale[i]);
         ofFill();
         ofEnableDepthTest();
         ofPopStyle();
@@ -811,14 +831,20 @@ void DrawingMode::drawOverlay() {
         const float y = screen.y - 40.0f;
 
         ofPushStyle();
-        ofSetColor(0, 0, 0, 180);
+
+        // The plate has to cover both lines, and the coordinate readout is
+        // routinely the wider of the two.
         const ofRectangle box = font.getStringBoundingBox(handLabel[i], 0, 0);
-        ofDrawRectRounded(x - box.width * 0.5f - 6.0f, y - box.height - 6.0f,
-                          box.width + 12.0f, box.height + 24.0f, 4.0f);
+        const ofRectangle subBox = font.getStringBoundingBox(handSubLabel[i], 0, 0);
+        const float plateWidth = std::max(box.width, subBox.width);
+
+        ofSetColor(0, 0, 0, 180);
+        ofDrawRectRounded(x - plateWidth * 0.5f - 6.0f, y - box.height - 6.0f,
+                          plateWidth + 12.0f, box.height + 24.0f, 4.0f);
         ofSetColor(235);
         font.drawString(handLabel[i], x - box.width * 0.5f, y);
         ofSetColor(170);
-        font.drawString(handSubLabel[i], x - box.width * 0.5f, y + 14.0f);
+        font.drawString(handSubLabel[i], x - subBox.width * 0.5f, y + 14.0f);
         ofPopStyle();
     }
 

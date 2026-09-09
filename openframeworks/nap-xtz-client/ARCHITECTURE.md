@@ -136,24 +136,89 @@ The NAPLPS canvas keeps the FBO caching the earlier player had: a finished
 drawing is static, so the FBO is only redrawn while the progressive draw is
 still running or something marks it dirty.
 
+### The canvas geometry
+
+`ofApp::updateLayout()` reproduces three separate things the browser does, and
+they have to agree or every drawing comes out distorted:
+
+| Browser | Here |
+| --- | --- |
+| `scaleFactor = min(windowWidth/640, windowHeight/480)` | same, from `ofGetWidth()`/`ofGetHeight()` |
+| `createCanvas(640*sf, 480*sf)`, centred by `#main-canvas` CSS | `canvasSize`, `canvasOffset` |
+| `scale(sf); translate(0, sH - sW)` | `drawSize = canvasSize.x`, `drawOffset.y = canvasSize.y - canvasSize.x` |
+
+The artwork is rendered into a **square** as wide as the canvas and then pushed
+up by the quarter that overhangs it, so what shows is the bottom three quarters
+of that square. That is the same convention `convertToNaplps()` encodes to and
+the browser's SVG importer writes (`y/sH*0.75 + 0.25`); a drawing round-trips
+through hands, encoder and canvas at the size it was made.
+
+The FBO is allocated at the canvas size and blitted 1:1. It is reallocated on
+resize, along with the placeholder font.
+
+### The empty state
+
+With nothing loaded the canvas is black with `\\ DRAG ' n ' DROP //` across the
+middle, in Telidon-Bold at the browser's 36px scaled to the window — the same
+placeholder `index.html`'s `draw()` shows when `telidon` is empty. It is what is
+on screen at startup while the chain read is out, after `x` (the browser's
+"clear" link), and on entering live drawing.
+
 ## Keys
 
-| Key | |
-| --- | --- |
-| `d` | enter/leave live drawing |
-| `s` | slideshow |
-| `n` | publish the current drawing to every client |
-| `m` | mint the current drawing (server-side signing) |
-| `c` | load the latest drawing from the chain |
-| arrows | next/previous sample file |
-| `space` | redraw |
-| `p` / `l` | progressive draw / label points |
-| `i` | info overlay |
-| `f` | fullscreen |
+| Key | | Browser equivalent |
+| --- | --- | --- |
+| `d` | enter/leave live drawing | Live Drawing button |
+| `s` | slideshow | "slideshow" link |
+| `n` | publish the current drawing to every client | — |
+| `m` | mint the current drawing (server-side signing) | Mint to Tezos |
+| `c` | load the latest drawing from the chain | "latest" link |
+| `x` | clear the canvas | "clear" link |
+| arrows | next/previous sample file | — |
+| `space` | redraw | — |
+| `p` / `l` | progressive draw / label points | — |
+| `i` | info overlay | — |
+| `f` | fullscreen | — |
+
+Both chain reads — the one at startup and the one on `c` — run on a detached
+thread (`NapClient::fetchLatestAsync`) and arrive through the same queue a
+broadcast drawing does, so the window keeps drawing while the request is out.
+The browser's `preload()` does the same thing with a promise. If the startup
+read fails, this falls back to the first local sample, where the browser would
+leave its placeholder standing; a player on a wall with no reachable server
+should still have something to show.
 
 In drawing mode: `WASD` moves, `alt`+drag orbits, `alt`+`shift`+drag pans,
 wheel zooms; the mouse draws with the left button and opens the palette with the
 right, for working without a camera.
+
+## Where this deliberately differs
+
+Four places do not copy the JS line for line, and all four are visible to the
+user:
+
+**The hand's depth.** `drawing.js` sizes the plane the hands move on from
+`camera.position.z`, which is only the viewing distance while the camera sits on
+the z axis — orbit a quarter turn and it collapses to zero, taking the hand
+tracking with it. `updateHand()` uses the orbit radius, which is what that
+expression was standing in for and survives orbiting.
+
+**Clearing blinks the drawing.** `Frame.clearWithFlicker()` in the JS flickers a
+`lineMesh` that nothing ever populates, so a clear blinks nothing and then
+everything vanishes. Here the drawing itself blinks, which is what the shrinking
+red circles have been announcing for two seconds.
+
+**The palette suppresses drawing.** While a palette is open the hand is picking a
+colour, so `updateDrawing()` skips that controller. In the JS a `Pointing_Up`
+during the 1 s grip latch would draw a stroke through the open palette.
+
+**A gesture floor.** The tracker reports `None` below a score of 0.3 rather than
+naming its best guess. The browser takes the top category unconditionally, which
+is a worse trade when a misread fires an undo.
+
+The camera pip in the corner has no browser counterpart either — the browser
+hides its `<video>` element outright, but with no DOM to fall back on this is
+the only way to see why a hand isn't being picked up.
 
 ## Configuration
 

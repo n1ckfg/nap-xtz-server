@@ -157,6 +157,14 @@ class DrawingMode {
         std::array<std::string, kMaxHands> handLabel;
         std::array<std::string, kMaxHands> handSubLabel;
 
+        /// This frame's raw gesture name per hand, and how far the fingertip sat
+        /// from the camera. The pointer sphere is drawn from these rather than
+        /// from the latched buttons, so what it reports is the classifier's
+        /// reading right now -- which is what the JS shows, and what tells you
+        /// whether a gesture is landing before you commit to a hold.
+        std::array<std::string, kMaxHands> handGesture;
+        std::array<float, kMaxHands> handDepthScale { };
+
         MouseController mouseController;
         Palette mousePalette;
         bool mousePaletteVisible = false;

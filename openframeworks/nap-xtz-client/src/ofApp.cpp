@@ -30,9 +30,12 @@ void ofApp::setup() {
     lastSlideTime = 0.0f;
     sendSlideshowToRpi = false;
 
+    hasContent = false;
+    triedChainFallback = false;
+    promptFontSize = 0.0f;
+
     updateLayout();
-    loadNap(samples[sampleIndex]);
-    napSource = "file";
+    napSource = "none";
 
     // The websocket server starts listening the moment it's set up, so
     // everything a frame touches has to be ready first.
@@ -42,8 +45,6 @@ void ofApp::setup() {
     hostName = Pinopticon::getHostName();
 
     Pinopticon::setupWsServer(this, wsServer, WS_PORT, MAX_NAP_BYTES);
-
-    fbo.allocate(720, 540, GL_RGB);
 
     // ~ ~ ~ outbound link to nap-xtz-server ~ ~ ~
     // Overridable from bin/data/settings.json, so a Pi in an installation can
@@ -73,6 +74,13 @@ void ofApp::setup() {
 
     client.setup(clientSettings);
     client.start();
+
+    // The browser's preload() asks the chain for the newest drawing before it
+    // shows anything, and sits on the drag-and-drop placeholder until it
+    // answers. This does the same, off the draw loop; update() falls back to a
+    // local sample if the read fails, which is what the browser's "Chain read
+    // failed -- using local samples" status is telling the user.
+    client.fetchLatestAsync();
 
     // The camera and the gesture model both take seconds to come up, so live
     // drawing is prepared now rather than when the user asks for it.
@@ -117,6 +125,7 @@ void ofApp::showNap(const std::string & napRaw, const std::string & label) {
 
 //--------------------------------------------------------------
 void ofApp::startDrawing() {
+    hasContent = true;
     telidon.setup(naplps, drawSize, drawSize);
     telidon.setProgressiveDraw(progressiveDraw);
     telidon.setLabelPoints(labelPoints);
@@ -124,9 +133,54 @@ void ofApp::startDrawing() {
 }
 
 //--------------------------------------------------------------
+// index.html's setup()/windowResized(), plus #main-canvas in css/main.css: the
+// 640x480 canvas is scaled to fill the window without distorting it, and
+// centred. Inside it the artwork is drawn into a square as wide as the canvas
+// and shifted up by the quarter that doesn't fit.
 void ofApp::updateLayout() {
-    drawSize = 720;
-    drawOffset = glm::vec2(0, 540 - 720);
+    const float scaleFactor = std::min(ofGetWidth() / kCanvasW, ofGetHeight() / kCanvasH);
+
+    canvasSize = glm::vec2(kCanvasW * scaleFactor, kCanvasH * scaleFactor);
+    canvasOffset = glm::vec2((ofGetWidth() - canvasSize.x) * 0.5f,
+                             (ofGetHeight() - canvasSize.y) * 0.5f);
+
+    drawSize = canvasSize.x;                                   // square art space
+    drawOffset = glm::vec2(0.0f, canvasSize.y - canvasSize.x); // translate(0, sH - sW)
+
+    // The FBO holds the canvas at its own size, so drawing it is a straight blit
+    // rather than a rescale -- the previous fixed 720x540 buffer was being drawn
+    // into 720x480 and squashing every drawing by a ninth.
+    const int fboW = std::max(1, (int)std::round(canvasSize.x));
+    const int fboH = std::max(1, (int)std::round(canvasSize.y));
+    if (!fbo.isAllocated() || (int)fbo.getWidth() != fboW || (int)fbo.getHeight() != fboH) {
+        fbo.allocate(fboW, fboH, GL_RGB);
+        fbo.begin();
+        ofClear(0, 0, 0, 255);
+        fbo.end();
+    }
+
+    // The prompt is 36px against a 480-tall canvas in the browser; keep it that
+    // fraction of the height here so it scales with the window.
+    const float wantSize = std::max(8.0f, canvasSize.y * (36.0f / kCanvasH));
+    if (std::abs(wantSize - promptFontSize) > 0.5f) {
+        promptFontSize = wantSize;
+        if (!promptFont.load("Telidon-Bold.ttf", (int)promptFontSize, true, true)) {
+            promptFont.load(OF_TTF_SANS, (int)promptFontSize, true, true);
+        }
+    }
+
+    bFboDirty = true;
+}
+
+//--------------------------------------------------------------
+// The browser's "clear" link: drop the drawing and stop the slideshow, leaving
+// the placeholder behind.
+void ofApp::clearCanvas() {
+    stopSlideshow();
+    hasContent = false;
+    pendingNapRaw.clear();
+    napSource = "none";
+    naplps.fileName = "";
     bFboDirty = true;
 }
 
@@ -158,6 +212,10 @@ void ofApp::update() {
     }
 
     if (gotOne) {
+        // Every path into the browser's canvas runs through loadTelidonFromText(),
+        // which stops the slideshow first: content someone sent deliberately
+        // outranks it.
+        stopSlideshow();
         napSource = frame.source.empty() ? "network" : frame.source;
         showNap(frame.nap, "(" + napSource + ")");
     }
@@ -172,7 +230,27 @@ void ofApp::update() {
     if (gotMessage) {
         stopSlideshow(); // live content takes over
         napSource = message.source.empty() ? "server" : message.source;
-        showNap(message.naplps, "(" + napSource + ")");
+
+        // A drawing read off the chain names its token, the way the browser's
+        // status line says "Token #N loaded from chain".
+        const std::string label = (message.tokenId >= 0)
+            ? "(token " + ofToString(message.tokenId) + ")"
+            : "(" + napSource + ")";
+
+        showNap(message.naplps, label);
+    }
+
+    // ~ ~ ~ the startup chain read gave up ~ ~ ~
+    // The browser leaves its placeholder standing here. A player on a wall with
+    // no reachable server would then show nothing at all, so it falls back to
+    // the first local sample instead -- once, and only if nothing else has
+    // arrived in the meantime.
+    if (!triedChainFallback && client.getLatestState() == NapClient::FetchState::Failed) {
+        triedChainFallback = true;
+        if (!hasContent) {
+            loadNap(samples[sampleIndex]);
+            napSource = "file";
+        }
     }
 
     // ~ ~ ~ slideshow ~ ~ ~
@@ -203,22 +281,43 @@ void ofApp::draw() {
         return;
     }
 
-    if (!telidon.isFinished() || bFboDirty) {
-        fbo.begin();
-        ofBackground(0);
+    ofBackground(0);
 
-        ofPushMatrix();
-        ofTranslate(drawOffset.x, drawOffset.y);
-        telidon.draw();
-        ofPopMatrix();
-        fbo.end();
-
-        if (telidon.isFinished()) {
-            bFboDirty = false;
+    if (!hasContent) {
+        // index.html's empty state: nothing loaded, so the canvas is just the
+        // prompt. The browser stops its draw loop here; there's no equivalent
+        // in OF and a static string costs nothing to redraw.
+        const std::string prompt = "\\\\ DRAG ' n ' DROP //";
+        ofSetColor(255);
+        if (promptFont.isLoaded()) {
+            const ofRectangle box = promptFont.getStringBoundingBox(prompt, 0, 0);
+            promptFont.drawString(prompt,
+                                  canvasOffset.x + (canvasSize.x - box.width) * 0.5f - box.x,
+                                  canvasOffset.y + canvasSize.y * 0.5f);
+        } else {
+            ofDrawBitmapString(prompt,
+                               canvasOffset.x + canvasSize.x * 0.5f - prompt.size() * 4.0f,
+                               canvasOffset.y + canvasSize.y * 0.5f);
         }
-    }
+    } else {
+        if (!telidon.isFinished() || bFboDirty) {
+            fbo.begin();
+            ofBackground(0);
 
-    fbo.draw(0, 0, 720, 480);
+            ofPushMatrix();
+            ofTranslate(drawOffset.x, drawOffset.y);
+            telidon.draw();
+            ofPopMatrix();
+            fbo.end();
+
+            if (telidon.isFinished()) {
+                bFboDirty = false;
+            }
+        }
+
+        // Straight through at its own size, into the centred 4:3 box.
+        fbo.draw(canvasOffset.x, canvasOffset.y, canvasSize.x, canvasSize.y);
+    }
 
     if (showInfo) {
         ofDrawBitmapStringHighlight(infoText, 10, 20);
@@ -231,7 +330,10 @@ void ofApp::draw() {
 
 //--------------------------------------------------------------
 void ofApp::enterDrawingMode() {
-    stopSlideshow(); // as in the browser: drawing blocks the slideshow
+    // The browser's Live Drawing button empties the canvas (`telidon = []`) on
+    // the way in, so leaving without drawing anything lands back on the
+    // placeholder rather than on whatever was there before.
+    clearCanvas();
     ofShowCursor();
     drawingMode.start();
 }
@@ -479,19 +581,18 @@ void ofApp::keyPressed(int key) {
         case 'm':
             mintCurrent();
             break;
-        case 'c': {
-            // Pull the newest drawing on chain, the browser's "latest" link.
-            NapClient::Message latest;
-            std::string error;
-            if (client.fetchLatest(latest, error)) {
-                stopSlideshow();
-                showNap(latest.naplps, "(token " + ofToString(latest.tokenId) + ")");
-                napSource = "chain";
-            } else {
-                ofLogWarning("nap-xtz-client") << "latest: " << error;
-            }
+        case 'c':
+            // The browser's "latest" link: clear the canvas, then ask the chain.
+            // The answer comes back through the message queue in update(), so
+            // the window keeps drawing while the request is out -- doing it
+            // inline froze the app for the length of the round trip.
+            clearCanvas();
+            client.fetchLatestAsync();
             break;
-        }
+        case 'x':
+            // The browser's "clear" link.
+            clearCanvas();
+            break;
         default:
             break;
     }
@@ -530,7 +631,7 @@ void ofApp::mouseScrolled(int x, int y, float scrollX, float scrollY) {
 //--------------------------------------------------------------
 void ofApp::windowResized(int w, int h) {
     updateLayout();
-    telidon.setSize(drawSize, drawSize);
+    if (hasContent) telidon.setSize(drawSize, drawSize);
 }
 
 //--------------------------------------------------------------
@@ -562,6 +663,7 @@ void ofApp::updateInfoText() {
     infoText += "n:      publish this drawing\n";
     infoText += "m:      mint this drawing\n";
     infoText += "c:      load latest from chain\n";
+    infoText += "x:      clear\n";
     infoText += "arrows: next/prev file\n";
     infoText += "space:  redraw\n";
     infoText += "p:      progressive draw " + std::string(progressiveDraw ? "on" : "off") + "\n";

@@ -392,6 +392,36 @@ std::string NapClient::getMintStatus() const {
 }
 
 //--------------------------------------------------------------
+void NapClient::fetchLatestAsync() {
+    FetchState expected = FetchState::Idle;
+    if (!latestState.compare_exchange_strong(expected, FetchState::Pending)) {
+        // Already in flight, or already answered. A second request while the
+        // first is outstanding would only race it to the same queue.
+        if (expected == FetchState::Pending) return;
+        latestState.store(FetchState::Pending);
+    }
+
+    // Detached, like mintAsync(): a chain read goes out over the network and
+    // nothing here waits on the result -- it arrives through the incoming queue.
+    std::thread([this]() {
+        Message message;
+        std::string error;
+
+        if (fetchLatest(message, error)) {
+            {
+                std::lock_guard<std::mutex> lock(incomingMutex);
+                incoming.push_back(message);
+                while (incoming.size() > kMaxIncoming) incoming.pop_front();
+            }
+            latestState.store(FetchState::Succeeded);
+        } else {
+            ofLogWarning("NapClient") << "latest: " << error;
+            latestState.store(FetchState::Failed);
+        }
+    }).detach();
+}
+
+//--------------------------------------------------------------
 bool NapClient::fetchLatest(Message & out, std::string & outError) {
     std::string body;
     int status = 0;

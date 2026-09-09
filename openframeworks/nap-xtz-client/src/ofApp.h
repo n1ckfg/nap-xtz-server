@@ -48,6 +48,10 @@ class ofApp : public ofBaseApp {
         void startDrawing();
         void updateLayout();
 
+        /// The browser's "clear" link: empties the canvas back to its
+        /// drag-and-drop placeholder.
+        void clearCanvas();
+
         Naplps naplps;   // the decoder,  ported from naplps.js
         Telidon telidon; // the renderer, ported from TelidonP5.js
 
@@ -56,10 +60,32 @@ class ofApp : public ofBaseApp {
         std::vector<std::string> samples;
         int sampleIndex;
 
-        // The NAPLPS unit screen runs from (0,0) to (1,1), so it gets a square
-        // of the window, centered.
+        // The browser's canvas is 640x480 (index.html: sW, sH), scaled to fill
+        // the window while keeping that aspect ratio and centred in it.
+        static constexpr float kCanvasW = 640.0f;
+        static constexpr float kCanvasH = 480.0f;
+
+        // Where that canvas lands in this window, in pixels.
+        glm::vec2 canvasSize;
+        glm::vec2 canvasOffset;
+
+        // The NAPLPS unit screen runs from (0,0) to (1,1) and is rendered into a
+        // SQUARE the width of the canvas, then shifted up by the quarter that
+        // overhangs it -- index.html's `scale(scaleFactor); translate(0, sH-sW)`.
+        // So what shows is the bottom three quarters of that square, which is
+        // the convention the SVG importer and convertToNaplps() both encode to.
         float drawSize;
         glm::vec2 drawOffset;
+
+        /// False when nothing is loaded, which is the browser's empty state:
+        /// black, with the drag-and-drop prompt in the middle.
+        bool hasContent;
+        ofTrueTypeFont promptFont;
+        float promptFontSize;
+
+        /// Set once the startup chain read has been given up on, so the local
+        /// samples are only substituted in the once.
+        bool triedChainFallback;
 
         bool progressiveDraw;
         bool labelPoints;
