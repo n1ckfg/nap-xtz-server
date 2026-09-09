@@ -282,6 +282,22 @@ a:hover {
 	left: 50%;
 }
 
+/* Mint status, shown over the drawing. #tezos-status sits inside #container,
+   which this overlay covers and .ui-hidden hides, so the kiosk needs its own. */
+#drawing-container #drawing-status {
+	position: absolute;
+	bottom: 40px;
+	left: 50%;
+	transform: translateX(-50%);
+	color: #ffcc00;
+	font-family: sans-serif;
+	font-size: 1.2em;
+	text-shadow: 1px 1px 2px black;
+	pointer-events: none;
+	z-index: 110;
+	display: none;
+}
+
 #btn-exit-drawing {
 	position: fixed;
 	top: 20px;

@@ -1,0 +1,1 @@
+node -e "const crypto = require('crypto'); const { generateSecretKey, InMemorySigner } = require('@taquito/signer'); (async () => {const sk = generateSecretKey(crypto.randomBytes(32), \"m/44'/1729'/0'/0'\", 'ed25519'); console.log('TEZOS_SECRET_KEY=' + sk); console.log('address:', await (await InMemorySigner.fromSecretKey(sk)).publicKeyHash()); })();"

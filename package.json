@@ -2,6 +2,8 @@
     "name": "LightningArtist",
     "version": "0.0.1",
     "dependencies": {
+        "@taquito/signer": "^25.0.0",
+        "@taquito/taquito": "^25.0.0",
         "body-parser": "^1.19.0",
         "dotenv": "^8.0.0",
         "express": "^4.22.2",

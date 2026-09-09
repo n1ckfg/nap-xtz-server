@@ -92,6 +92,11 @@ const UNDO_CIRCLE_MIN_SCALE = 0.1; // 10%
 const UNDO_CIRCLE_SPACING = 0.5; // 50% of circle width apart
 let pendingAction = null; // 'undo' or 'reset'
 
+// Kiosk-visible status line (mint feedback)
+let drawingStatusEl = null;
+let drawingStatusTimer = null;
+const DRAWING_STATUS_HOLD = 6000; // ms a finished message stays up
+
 // Confirm (green expanding) circle state
 let confirmOverlay = null;
 let confirmCircleLeft = null;
@@ -300,6 +305,8 @@ function initThreeJS() {
         confirmCircleRight.style.width = UNDO_CIRCLE_MAX_SIZE + 'px';
         confirmCircleRight.style.height = UNDO_CIRCLE_MAX_SIZE + 'px';
     }
+
+    drawingStatusEl = container.querySelector('#drawing-status') || document.getElementById('drawing-status');
 
     window.addEventListener('resize', onWindowResize, false);
 
@@ -1125,6 +1132,9 @@ export async function startDrawingMode(container) {
         confirmCircleRight.style.height = UNDO_CIRCLE_MAX_SIZE + 'px';
     }
 
+    drawingStatusEl = container.querySelector('#drawing-status') || document.getElementById('drawing-status');
+    hideDrawingStatus(); // whatever the last session ended on shouldn't greet this one
+
     await setupMediaPipe();
     await setupWebcam();
 
@@ -1264,22 +1274,55 @@ function convertToNAPLPS() {
 // see main.css) comes back for the wallet prompt.
 let mintInFlight = false;
 
+// The shim's own setStatus writes into #container -- behind this overlay, and
+// hidden along with the rest of the chrome -- so the gesture needs a status
+// line of its own or it reports only to the console. Pass hold = 0 to leave a
+// message up until the next one replaces it.
+function showDrawingStatus(text, isError, hold) {
+    if (!drawingStatusEl) return;
+
+    drawingStatusEl.textContent = text;
+    drawingStatusEl.style.color = isError ? '#ff6666' : '#ffcc00';
+    drawingStatusEl.style.display = 'block';
+
+    clearTimeout(drawingStatusTimer);
+    drawingStatusTimer = null;
+    const ms = hold === undefined ? DRAWING_STATUS_HOLD : hold;
+    if (ms > 0) drawingStatusTimer = setTimeout(hideDrawingStatus, ms);
+}
+
+function hideDrawingStatus() {
+    clearTimeout(drawingStatusTimer);
+    drawingStatusTimer = null;
+    if (drawingStatusEl) drawingStatusEl.style.display = 'none';
+}
+
 async function mintDrawing() {
     if (mintInFlight) return; // a held gesture shouldn't stack wallet prompts
 
     const napRaw = convertToNAPLPS();
     if (!napRaw) {
         console.warn('[nap-xtz] nothing to mint - draw something first');
+        showDrawingStatus('Draw something first', true);
         return;
     }
     if (typeof window.mintCurrentNaplps !== 'function') {
         console.error('[nap-xtz] mintCurrentNaplps not available');
+        showDrawingStatus('Minting unavailable', true);
         return;
     }
 
     mintInFlight = true;
+    // A server-signed mint waits on a confirmation (~15s on Shadownet), so this
+    // one stays up rather than timing out halfway through the wait.
+    showDrawingStatus('Minting...', false, 0);
     try {
-        await window.mintCurrentNaplps();
+        const result = await window.mintCurrentNaplps();
+        if (result && result.ok) {
+            showDrawingStatus('Minted');
+        } else {
+            showDrawingStatus('Mint failed: ' + ((result && result.error) || 'unknown error'), true);
+        }
     } finally {
         mintInFlight = false;
     }

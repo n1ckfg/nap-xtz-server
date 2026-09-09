@@ -162,6 +162,10 @@ async function disconnectWallet() {
 // validates the payload either way; what differs is who holds the key. Once
 // it's out, the backend's watcher picks up the new token and pushes it back as
 // a message, so there's nothing to poll for here.
+//
+// Both routes resolve to { ok, hash } or { ok: false, error }. The status line
+// below is invisible in drawing mode, so the gesture caller in js/drawing/ has
+// to be able to read the outcome and post it over the drawing itself.
 async function mintCurrentNaplps() {
     console.log("[nap-xtz] mintCurrentNaplps called");
 
@@ -169,7 +173,7 @@ async function mintCurrentNaplps() {
     if (!napRaw) {
         setStatus("Load some NAPLPS graphics first", true);
         console.warn("[nap-xtz] no pendingNapRaw");
-        return;
+        return { ok: false, error: "Nothing to mint" };
     }
 
     // The config picks the route, so fetch it if a gesture beat initTezos to it.
@@ -188,7 +192,7 @@ async function mintCurrentNaplps() {
         await connectWallet();
         if (!_activeAccount) {
             console.warn("[nap-xtz] wallet connection cancelled or failed");
-            return;
+            return { ok: false, error: "Wallet not connected" };
         }
     }
 
@@ -203,9 +207,11 @@ async function mintCurrentNaplps() {
 
         setStatus("Transaction sent, waiting for confirmation...");
         NapClient.notifyMinted(result && result.transactionHash);
+        return { ok: true, hash: result && result.transactionHash };
     } catch (e) {
         console.error("[nap-xtz] mint error:", e);
         setStatus("Mint failed: " + (e.message || e), true);
+        return { ok: false, error: e.message || String(e) };
     }
 }
 
@@ -226,9 +232,11 @@ async function serverMint(napRaw) {
             ? '<a href="' + base + "/" + hash + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
               "Minted</a> — waiting for it to appear"
             : "Minted — waiting for it to appear");
+        return { ok: true, hash: hash };
     } catch (e) {
         console.error("[nap-xtz] server mint error:", e);
         setStatus("Mint failed: " + (e.message || e), true);
+        return { ok: false, error: e.message || String(e) };
     }
 }
 
