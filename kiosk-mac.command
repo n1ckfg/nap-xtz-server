@@ -13,7 +13,8 @@ cd "$DIR"
 node app.js &
 
 URL="http://localhost:8080"
+
 #FLAGS="--kiosk --incognito --no-first-run --disable-infobars"
-FLAGS="--kiosk --noerrdialogs --disable-infobars --use-fake-ui-for-media-stream --no-first-run"
+FLAGS="--start-fullscreen"
 
 open -n -a "Google Chrome" --args "$FLAGS" "$URL"

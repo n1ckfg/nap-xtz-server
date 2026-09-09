@@ -198,6 +198,10 @@ a:hover {
 
 #drawing-container.active {
 	display: block;
+	/* Drawing is hand- (or mouse-) tracked with its own on-canvas cursor, so
+	   the system pointer is only a distraction here. The exit button sets its
+	   own cursor below, so it stays clickable when the chrome is showing. */
+	cursor: none;
 }
 
 #drawing-container canvas {
