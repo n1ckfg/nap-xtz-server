@@ -242,12 +242,18 @@ async function serverMint(napRaw) {
 
 // ─── Reading from chain ───────────────────────────────────────────────────────
 // A request to the backend, which owns the TzKT queries and the byte decoding.
-async function loadLatestToken() {
+//
+// `toRpi` is the "latest" link's doing: clicking it puts the drawing on the Pi
+// as well as this canvas, the way slideshow frames go out. The automatic load
+// when the page opens leaves the Pi alone -- reloading a browser is not a
+// decision to change what the Pi is showing.
+async function loadLatestToken(toRpi) {
     try {
         setStatus("Loading latest token from chain...");
         const token = await NapClient.getLatest();
         console.log("[nap-xtz] loaded from chain, NAPLPS length:", token.naplps.length);
         loadTelidonFromText(token.naplps);
+        if (toRpi) NapClient.sendToRpi(token.naplps, "latest");
 
         const link = token.link || "#";
         setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +

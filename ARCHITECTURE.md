@@ -73,6 +73,7 @@ The frontend is a single-page app (`index.html`) offering several modes of inter
 - SVG-to-NAPLPS encoding via `NapEncoder`
 - Tezos wallet connection and minting UI
 - A "Live Drawing" button to launch the 3D drawing mode overlay
+- A "latest" link that loads the newest on-chain drawing. Clicking it also sends that drawing to the Raspberry Pi via `NapClient.sendToRpi()` — a deliberate choice to change what is on screen, so the Pi follows. The same load runs automatically when the page opens, and that one leaves the Pi alone.
 - Slideshow mode, which plays a random `.nap` from `./images` on an interval. While it runs, each frame it draws is also sent to the Raspberry Pi via `NapClient.sendToRpi()`, so the Pi shows what the page shows. Loading other content, or entering live drawing, stops the slideshow and the sending with it.
 
 ### JavaScript Modules
