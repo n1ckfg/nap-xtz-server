@@ -87,6 +87,8 @@ The frontend is a single-page app (`index.html`) offering several modes of inter
 **`js/tezos/` (Web3 & Wallets)**
 - `tezos.js` - Beacon SDK integration. Connects to the user's browser wallet (e.g., Temple), receives the unsigned payload from the backend via `POST /api/tezos/mint-params`, and prompts the user to sign and broadcast.
 
+There are two routes to a mint, and `GET /api/config`'s `serverSigning` flag picks between them. When the backend holds a key, `mintCurrentNaplps()` posts to `POST /api/tezos/mint` and the server signs — no wallet, no popup, which is the only way the gesture mint works unattended. A connected wallet still owns the token; with none connected, the server's own address does. Without a server key it falls back to the Beacon route, which prompts for every operation — Temple has no blanket pre-approval to switch off.
+
 **`js/drawing/` (Live 3D Drawing Mode)**
 An ES-module-based 3D environment built on Three.js and MediaPipe:
 - `drawing.js` - Main entry point. Sets up the Three.js scene, camera, and MediaPipe hand tracking.

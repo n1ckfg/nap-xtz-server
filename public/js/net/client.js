@@ -43,6 +43,18 @@ const NapClient = (function() {
         });
     }
 
+    // Asks the backend to sign and submit the mint itself, with the key in its
+    // .env -- no wallet, no popup. Only works when getConfig().serverSigning is
+    // true; otherwise the route answers 501 and the wallet has to sign.
+    // Resolves once the operation has a confirmation, so it is not quick.
+    function mint(napRaw, owner) {
+        return api("/api/tezos/mint", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ naplps: napRaw, owner: owner })
+        });
+    }
+
     // Tells the backend a wallet-signed mint went out, so it polls sooner.
     function notifyMinted(hash) {
         return api("/api/tezos/minted", {
@@ -131,6 +143,7 @@ const NapClient = (function() {
         getLatest: getLatest,
         getToken: getToken,
         getMintParams: getMintParams,
+        mint: mint,
         notifyMinted: notifyMinted,
         connect: connect,
         onNaplps: onNaplps,

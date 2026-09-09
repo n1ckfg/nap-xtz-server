@@ -158,9 +158,10 @@ async function disconnectWallet() {
 }
 
 // ─── Minting ──────────────────────────────────────────────────────────────────
-// The backend builds the operation and validates the payload; the wallet signs
-// it. Once it's out, the backend's watcher picks up the new token and pushes it
-// back as a message, so there's nothing to poll for here.
+// Two routes to the same contract call. The backend builds the operation and
+// validates the payload either way; what differs is who holds the key. Once
+// it's out, the backend's watcher picks up the new token and pushes it back as
+// a message, so there's nothing to poll for here.
 async function mintCurrentNaplps() {
     console.log("[nap-xtz] mintCurrentNaplps called");
 
@@ -170,6 +171,16 @@ async function mintCurrentNaplps() {
         console.warn("[nap-xtz] no pendingNapRaw");
         return;
     }
+
+    // The config picks the route, so fetch it if a gesture beat initTezos to it.
+    if (!_config) {
+        try { _config = await NapClient.getConfig(); } catch (e) { /* wallet route */ }
+    }
+
+    // When the backend holds a key it signs for itself, and no wallet UI opens.
+    // That's the unattended-kiosk case: the mint gesture in js/drawing/ has no
+    // way to drive a Temple popup, and nobody is there to approve one.
+    if (_config && _config.serverSigning) return serverMint(napRaw);
 
     // Auto-connect if no wallet is active yet.
     if (!_activeAccount) {
@@ -194,6 +205,29 @@ async function mintCurrentNaplps() {
         NapClient.notifyMinted(result && result.transactionHash);
     } catch (e) {
         console.error("[nap-xtz] mint error:", e);
+        setStatus("Mint failed: " + (e.message || e), true);
+    }
+}
+
+// Server-side signing: the backend signs with the key in its .env and waits for
+// a confirmation, so the token is on chain by the time this resolves. A
+// connected wallet still gets to own the token; with none, the server's own
+// address does.
+async function serverMint(napRaw) {
+    try {
+        setStatus("Minting...");
+        console.log("[nap-xtz] server mint, napRaw length:", napRaw.length);
+        const result = await NapClient.mint(napRaw, _activeAccount ? _activeAccount.address : null);
+        console.log("[nap-xtz] server mint result:", result);
+
+        const base = _config && _config.explorerBase;
+        const hash = result && result.hash;
+        setStatus(base && hash
+            ? '<a href="' + base + "/" + hash + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
+              "Minted</a> — waiting for it to appear"
+            : "Minted — waiting for it to appear");
+    } catch (e) {
+        console.error("[nap-xtz] server mint error:", e);
         setStatus("Mint failed: " + (e.message || e), true);
     }
 }
