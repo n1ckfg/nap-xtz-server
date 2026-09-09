@@ -5,5 +5,6 @@ function chromium-kiosk() {
 }
 
 echo $XDG_SESSION_TYPE
+node app.js &
 chromium-kiosk "http://localhost:8080"
 
