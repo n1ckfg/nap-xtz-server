@@ -1,6 +1,6 @@
 function chromium-kiosk() {
-        #--incognito --kiosk --start-fullscreen --noerrdialogs --disable-infobars --no-first-run --ozone-platform=wayland
-        CMD="--kiosk --noerrdialogs --disable-infobars --no-first-run --ozone-platform=wayland"
+        #--incognito --kiosk --start-fullscreen --use-fake-ui-for-media-stream --noerrdialogs --disable-infobars --no-first-run --ozone-platform=wayland
+        CMD="--kiosk --noerrdialogs --disable-infobars --use-fake-ui-for-media-stream --no-first-run --ozone-platform=wayland"
         chromium-browser $CMD $1
 }
 

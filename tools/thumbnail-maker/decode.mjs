@@ -31,6 +31,8 @@ function int(value) {
 }
 
 export function decodeNap(text, { verbose = false } = {}) {
+  if (text.length === 0) throw new Error("file is empty");
+
   const sandbox = { console: verbose ? console : quiet, pow: Math.pow, int, window: {} };
   script.runInContext(vm.createContext(sandbox));
   return new sandbox.window.NapDecoder([text]);

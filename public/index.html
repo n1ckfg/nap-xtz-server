@@ -633,22 +633,30 @@
 		<script type="module">
 			import { startDrawingMode, stopDrawingMode } from './js/drawing/drawing.js';
 
-			document.getElementById('btn-live-drawing').addEventListener('click', async () => {
+			const drawingContainer = document.getElementById('drawing-container');
+
+			async function enterDrawingMode() {
 				telidon = [];
 				liveDrawingActive = true; // block slideshow while drawing
 				stopSlideshow();
-				const container = document.getElementById('drawing-container');
-				container.classList.add('active');
-				await startDrawingMode(container);
-			});
+				drawingContainer.classList.add('active');
+				await startDrawingMode(drawingContainer);
+			}
 
-			document.getElementById('btn-exit-drawing').addEventListener('click', () => {
+			function exitDrawingMode() {
 				stopDrawingMode();
-				const container = document.getElementById('drawing-container');
-				container.classList.remove('active');
+				drawingContainer.classList.remove('active');
 				liveDrawingActive = false;
 				loop(); // refresh the main canvas (handles exit with no strokes drawn)
-			});
+			}
+
+			document.getElementById('btn-live-drawing').addEventListener('click', enterDrawingMode);
+			document.getElementById('btn-exit-drawing').addEventListener('click', exitDrawingMode);
+
+			// The page opens straight into live drawing, with the UI chrome hidden
+			// (see .ui-hidden in main.css) — press "h" for the controls, including
+			// Exit Drawing, which drops back to the NAPLPS viewer.
+			enterDrawingMode();
 		</script>
 	</body>
 

@@ -57,9 +57,13 @@ function main() {
   }
 
   const { values, positionals } = args;
-  if (values.help || positionals.length === 0) {
+  if (values.help) {
     console.log(USAGE);
-    process.exit(positionals.length === 0 && !values.help ? 2 : 0);
+    process.exit(0);
+  }
+  if (positionals.length === 0) {
+    console.error(USAGE);
+    process.exit(2);
   }
 
   const width = Number(values.width);

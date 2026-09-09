@@ -34,8 +34,7 @@ export function renderNap(napText, { width = SCREEN_W, verbose = false } = {}) {
     fill: [255, 255, 255],
     stroke: [0, 0, 0],
     weight: 1 * scale,
-    rectMode: "CORNER",
-    ellipseMode: "CENTER",
+    ellipseMode: "CENTER", // only arcs read this back; TelidonP5 sets rectMode inline
   };
   const stats = { version: decoder.version, commands: decoder.cmds.length, text: 0 };
 
@@ -47,9 +46,9 @@ export function renderNap(napText, { width = SCREEN_W, verbose = false } = {}) {
     gfx.stroke = [v.x, v.y, v.z];
   }
 
-  function paint(path, { close = true } = {}) {
+  function paint(path) {
     if (gfx.fill && path.length >= 3) canvas.fill([path], gfx.fill);
-    if (gfx.stroke && path.length >= 1) canvas.stroke(path, gfx.weight, gfx.stroke, { closed: close });
+    if (gfx.stroke && path.length >= 1) canvas.stroke(path, gfx.weight, gfx.stroke, { closed: true });
   }
 
   // beginShape() ... vertex() ... endShape(CLOSE)
@@ -64,8 +63,7 @@ export function renderNap(napText, { width = SCREEN_W, verbose = false } = {}) {
       drawPoints(points, undefined); // TelidonP5 falls back without the fill flag
       return;
     }
-    gfx.rectMode = "CORNER";
-    const [a, b] = points.map(toDevice);
+    const [a, b] = points.map(toDevice); // p5: rectMode(CORNER), rect(x1, y1, x2 - x1, y2 - y1)
     paint([[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]);
   }
 
