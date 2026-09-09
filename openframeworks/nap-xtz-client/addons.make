@@ -1,10 +1,10 @@
-ofxMediaPipe
-ofxNaplps
-ofxHTTP
+ofxCrypto
+ofxPoco
+ofxSSLManager
 ofxIO
 ofxMediaType
 ofxNetworkUtils
-ofxPoco
-ofxSSLManager
+ofxHTTP
 ofxJSON
-ofxCrypto
+ofxMediaPipe
+ofxNaplps
