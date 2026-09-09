@@ -172,7 +172,7 @@ on screen at startup while the chain read is out, after `x` (the browser's
 | `s` | slideshow | "slideshow" link |
 | `n` | publish the current drawing to every client | — |
 | `m` | mint the current drawing (server-side signing) | Mint to Tezos |
-| `c` | load the latest drawing from the chain | "latest" link |
+| `c` | canvas: load the latest drawing from the chain; drawing mode: switch camera | "latest" link |
 | `x` | clear the canvas | "clear" link |
 | arrows | next/previous sample file | — |
 | `space` | redraw | — |
@@ -190,7 +190,23 @@ should still have something to show.
 
 In drawing mode: `WASD` moves, `alt`+drag orbits, `alt`+`shift`+drag pans,
 wheel zooms; the mouse draws with the left button and opens the palette with the
-right, for working without a camera.
+right, for working without a camera. `c` there swaps the Pi's ribbon camera for a
+USB webcam and back — a different key from the canvas's `c`, because the camera
+only exists in this mode and the chain read only exists in the other.
+
+`VideoSource::switchTo()` is what makes that safe. It closes the old source
+first, since a CSI pipe and a webcam can both be holding the same sensor, and
+puts it back if the requested one will not open, so asking for a camera that
+isn't there costs nothing; if the old one will not reopen either it re-probes
+the normal order, which ends at Synthetic. A camera that dies *while* running is
+the other half of it: a short read on the rpicam pipe (the camera unplugged, or
+rpicam-vid never installed — neither is detectable at `popen()` time, because
+the shell starts either way) falls through the same order with CSI excluded,
+which is what stops it looping.
+
+Either outcome is named in the drawing-mode HUD for four seconds. A refused
+switch leaves the picture exactly as it was, which on its own reads as the key
+not working rather than as the camera not being there.
 
 ## Where this deliberately differs
 
@@ -261,3 +277,12 @@ sample — and `n` publishes the same 11215 bytes back unchanged, so the NAPLPS
 survives the JSON round trip intact. MediaPipe loads its gesture model, and
 `VideoSource` falls back to a synthetic feed when it finds no camera, which is
 what makes the app testable headless under Xvfb.
+
+The camera switch is verified only on its failure path: this machine has no
+camera attached — `rpicam-hello` reports none and every `/dev/video*` is a codec
+or ISP node — so pressing `c` twice under Xvfb exercised "requested camera
+absent, keep what works" both times and the app carried on from the synthetic
+feed. **The CSI↔webcam swap itself is untested against hardware.** Anyone with
+both cameras plugged in should confirm two things the failure path cannot show:
+that the pip picture actually changes, and that switching back to CSI succeeds
+after `rpicam-vid` has once been closed and its sensor released.

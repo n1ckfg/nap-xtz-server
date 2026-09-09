@@ -43,6 +43,17 @@ public:
 	bool setup(const Settings & settings);
 	void close();
 
+	/// Switches to one specific backend, keeping the current source if the new
+	/// one cannot be opened. Returns true only if `wanted` is now running;
+	/// getLastError() says why not otherwise. Never leaves the app without a
+	/// source: if even the previous backend can no longer be reopened, the
+	/// normal probe order runs and lands on Synthetic at worst.
+	bool switchTo(Backend wanted);
+
+	/// Why the last setup()/switchTo() could not do what was asked. Empty once
+	/// something succeeds outright.
+	const std::string & getLastError() const { return lastError; }
+
 	/// Pulls the next frame if one is ready.
 	void update();
 
@@ -67,6 +78,14 @@ public:
 	static std::string toString(Backend backend);
 
 private:
+	/// Runs one backend's probe, turning any exception into a probe-log line
+	/// rather than letting it out: a source that fails to open is a normal
+	/// outcome here, not an error condition.
+	bool tryBackend(Backend candidate);
+	/// Re-probes the normal order with one backend left out, for when a source
+	/// dies while running. Excluding it is what stops this from looping.
+	bool fallbackExcluding(Backend excluded);
+
 	bool tryCsi();
 	bool tryWebcam();
 	bool tryVideoFile();
@@ -86,6 +105,7 @@ private:
 	Settings settings;
 	Backend backend = Backend::None;
 	std::string description;
+	std::string lastError;
 	std::vector<std::string> probeLog;
 
 	ofPixels pixels;

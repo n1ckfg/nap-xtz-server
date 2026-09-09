@@ -162,7 +162,8 @@ void DrawingMode::updateTracking() {
         tracker.setPixels(video.getPixels());
 
         if (!cameraTexture.isAllocated()
-            || cameraTexture.getWidth() != video.getPixels().getWidth()) {
+            || cameraTexture.getWidth() != video.getPixels().getWidth()
+            || cameraTexture.getHeight() != video.getPixels().getHeight()) {
             cameraTexture.allocate(video.getPixels());
         }
         cameraTexture.loadData(video.getPixels());
@@ -609,6 +610,10 @@ void DrawingMode::keyPressed(int key) {
         case 'a': keyA = true; break;
         case 's': keyS = true; break;
         case 'd': keyD = true; break;
+        case 'c':
+            if (!keyC) toggleCameraSource();
+            keyC = true;
+            break;
         default: break;
     }
 
@@ -623,11 +628,37 @@ void DrawingMode::keyReleased(int key) {
         case 'a': keyA = false; break;
         case 's': keyS = false; break;
         case 'd': keyD = false; break;
+        case 'c': keyC = false; break;
         default: break;
     }
 
     if (key == OF_KEY_ALT) altDown = false;
     if (key == OF_KEY_SHIFT) shiftDown = false;
+}
+
+//--------------------------------------------------------------
+void DrawingMode::toggleCameraSource() {
+    // Only ever between the two real cameras. If the app came up on a movie,
+    // a still or the synthetic feed there was no camera to begin with, so this
+    // starts at the Pi's -- the one that is there on the hardware this runs on.
+    const VideoSource::Backend wanted = (video.getBackend() == VideoSource::Backend::Csi)
+        ? VideoSource::Backend::Webcam
+        : VideoSource::Backend::Csi;
+
+    // Safe to pull the source out from under the tracker: setPixels() copies,
+    // so an inference already running on the worker thread finishes on its own
+    // frame rather than on freed pixels.
+    if (video.switchTo(wanted)) {
+        videoMessage = "camera: " + video.getBackendName() + " - " + video.getDescription();
+    } else {
+        videoMessage = "no " + VideoSource::toString(wanted) + " (" + video.getLastError()
+            + ") - still on " + video.getBackendName();
+    }
+    videoMessageStart = ofGetElapsedTimeMillis();
+
+    // The two cameras need not agree on frame size, and a stale texture would
+    // be drawn at the wrong one until the first new frame lands.
+    cameraTexture.clear();
 }
 
 //--------------------------------------------------------------
@@ -931,6 +962,11 @@ std::string DrawingMode::getStatusText() const {
     std::string text = "LIVE DRAWING\n";
     text += "source: " + video.getBackendName() + "\n";
 
+    if (!videoMessage.empty()
+        && ofGetElapsedTimeMillis() - videoMessageStart < kVideoMessageDuration) {
+        text += videoMessage + "\n";
+    }
+
     if (tracker.isFailed()) {
         text += "models: FAILED - " + tracker.getError() + "\n";
     } else if (!tracker.isReady()) {
@@ -946,7 +982,8 @@ std::string DrawingMode::getStatusText() const {
     text += "point: draw   fist: grab world / hold for palette\n";
     text += "thumb down: hold to undo (both hands: clear)\n";
     text += "thumb up:   hold to recentre (both hands: exit)\n";
-    text += "mouse: left draw, right palette, alt+drag orbit";
+    text += "mouse: left draw, right palette, alt+drag orbit\n";
+    text += "c: switch between Pi camera and USB webcam";
     return text;
 }
 

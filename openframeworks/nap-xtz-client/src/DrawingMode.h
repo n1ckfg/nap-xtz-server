@@ -77,6 +77,11 @@ class DrawingMode {
         void mouseReleased(int x, int y, int button);
         void mouseScrolled(float scrollY);
 
+        /// Swaps the Pi's ribbon camera for a USB webcam and back, which is what
+        /// `c` does in this mode. Keeps the current camera if the other one
+        /// isn't there, and says so in the HUD either way.
+        void toggleCameraSource();
+
         /// The NAPLPS produced by the last stop(), or "" if nothing was drawn.
         /// ofApp picks this up to display, publish and optionally mint.
         const std::string & getEncodedNaplps() const { return encodedNaplps; }
@@ -135,6 +140,12 @@ class DrawingMode {
         /// Kept so the HUD can show what the camera sees; the scene itself is
         /// drawn over it rather than beside it.
         ofTexture cameraTexture;
+        /// What the last camera switch did, shown for a few seconds. A failed
+        /// switch is silent otherwise -- the picture simply doesn't change,
+        /// which reads as the key not working.
+        std::string videoMessage;
+        uint64_t videoMessageStart = 0;
+        static constexpr uint64_t kVideoMessageDuration = 4000;
 
         // ~ ~ ~ scene ~ ~ ~
         ofCamera camera;
@@ -182,6 +193,10 @@ class DrawingMode {
         static constexpr float kMoveSpeed = 0.1f;
 
         bool keyW = false, keyA = false, keyS = false, keyD = false;
+        /// Held rather than tapped, `c` would arrive as a key repeat every few
+        /// frames and reopen the camera each time; this makes it fire once per
+        /// press.
+        bool keyC = false;
         bool altDown = false, shiftDown = false;
         bool isMouseOrbiting = false;
         glm::vec2 lastMouse { 0.0f, 0.0f };

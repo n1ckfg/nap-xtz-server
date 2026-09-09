@@ -119,24 +119,106 @@ bool VideoSource::setup() {
 	return setup(Settings());
 }
 
+bool VideoSource::tryBackend(Backend candidate) {
+	// Opening a camera reaches a long way outside this process -- a subprocess,
+	// a V4L2 driver, a file on disk -- so a throw is treated the same as a
+	// polite "no": it goes in the probe log and the next backend gets its turn.
+	try {
+		switch (candidate) {
+		case Backend::Csi: return tryCsi();
+		case Backend::Webcam: return tryWebcam();
+		case Backend::VideoFile: return tryVideoFile();
+		case Backend::Image: return tryImage();
+		case Backend::Synthetic: return trySynthetic();
+		case Backend::None: break;
+		}
+	} catch (const std::exception & e) {
+		probeLog.push_back(toString(candidate) + ": threw - " + e.what());
+	} catch (...) {
+		probeLog.push_back(toString(candidate) + ": threw an unknown exception");
+	}
+	return false;
+}
+
 bool VideoSource::setup(const Settings & s) {
 	close();
 	settings = s;
 	probeLog.clear();
+	lastError.clear();
 
 	for (const Backend candidate : settings.order) {
-		bool ok = false;
-		switch (candidate) {
-		case Backend::Csi: ok = tryCsi(); break;
-		case Backend::Webcam: ok = tryWebcam(); break;
-		case Backend::VideoFile: ok = tryVideoFile(); break;
-		case Backend::Image: ok = tryImage(); break;
-		case Backend::Synthetic: ok = trySynthetic(); break;
-		case Backend::None: break;
-		}
-		if (ok) {
+		if (tryBackend(candidate)) {
 			backend = candidate;
 			ofLogNotice("VideoSource") << "using " << getBackendName() << ": " << description;
+			return true;
+		}
+	}
+
+	backend = Backend::None;
+	lastError = "no video source could be opened";
+	return false;
+}
+
+bool VideoSource::switchTo(Backend wanted) {
+	if (wanted == Backend::None) {
+		lastError = "no such video source";
+		return false;
+	}
+	if (wanted == backend) {
+		lastError.clear();
+		return true;
+	}
+
+	const Backend previous = backend;
+	// The previous source has to be let go first: a CSI pipe and a webcam can
+	// both be holding the same sensor, and rpicam-vid will not start a second
+	// time on one that is already streaming.
+	close();
+	probeLog.clear();
+	lastError.clear();
+
+	if (tryBackend(wanted)) {
+		backend = wanted;
+		ofLogNotice("VideoSource") << "switched to " << getBackendName() << ": " << description;
+		return true;
+	}
+
+	lastError = probeLog.empty()
+		? toString(wanted) + " unavailable"
+		: probeLog.front();
+	ofLogWarning("VideoSource") << "could not switch to " << toString(wanted)
+		<< ": " << lastError;
+
+	// Asking for something that is not there must not cost the source that was
+	// already working, so put it back.
+	if (previous != Backend::None && tryBackend(previous)) {
+		backend = previous;
+		ofLogNotice("VideoSource") << "kept " << getBackendName();
+		return false;
+	}
+
+	// It would not reopen either -- unplugged mid-session, say. Rather than run
+	// on with no frames at all, fall back through the normal order, which ends
+	// at Synthetic.
+	const std::string switchError = lastError;
+	setup(settings);
+	lastError = switchError;
+	return false;
+}
+
+bool VideoSource::fallbackExcluding(Backend excluded) {
+	const Settings s = settings;
+	close();
+	probeLog.clear();
+
+	for (const Backend candidate : s.order) {
+		if (candidate == excluded) {
+			continue;
+		}
+		if (tryBackend(candidate)) {
+			backend = candidate;
+			ofLogNotice("VideoSource") << "fell back to " << getBackendName()
+				<< ": " << description;
 			return true;
 		}
 	}
@@ -375,9 +457,13 @@ void VideoSource::updateCsi() {
 	// rate; rpicam-vid throttles the pipe to --framerate.
 	const size_t read = fread(csiFrame.data(), 1, csiFrameBytes, csiPipe);
 	if (read != (size_t)csiFrameBytes) {
+		// rpicam-vid missing, or the camera taken away mid-session. Nothing is
+		// detectable at popen() time -- the shell starts either way -- so this
+		// short read is the first news of it, and the app carries on with
+		// whatever else this machine has.
 		ofLogWarning("VideoSource") << "CSI stream ended";
-		pclose(csiPipe);
-		csiPipe = nullptr;
+		lastError = "CSI stream ended";
+		fallbackExcluding(Backend::Csi);
 		return;
 	}
 	i420ToRgb(csiFrame.data(), csiWidth, csiHeight, pixels);
