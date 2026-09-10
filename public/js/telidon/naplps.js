@@ -1512,7 +1512,7 @@ class NapEncoder {
 			// negative value that reaches here as zero, so it still reads as one.
 			switch (i) {
 				case 0:
-					if (input.x >= 0) {
+					if (input.x >= 0 && !Object.is(input.x, -0)) {
 						vectorByte += "0";
 					} else {
 						vectorByte += "1";
