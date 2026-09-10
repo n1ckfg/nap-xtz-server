@@ -95,9 +95,10 @@ the `vm`.
 A function in `candidates.mjs` returning `[{ color, points }]` in the 0..1 space
 the format draws in, plus a line in `CANDIDATES` at the foot of that file.
 `compare` picks the table up from that list. The candidates already there are
-the ones that were weighed before the current geometry was chosen — one long
-outline of the whole stroke (in 3D, as the code used to, and in 2D), the ribbon
-cut into overlapping chunks, and per-segment quads cornered with a mitre.
+the ones that have been weighed against what ships — one long outline of the
+whole stroke (in 3D, as the code used to, and in 2D), the ribbon cut into
+overlapping chunks, per-segment quads cornered with a mitre, and the polygon
+soup: the same quads split into triangles, one filled polygon each.
 
 ## Known gaps
 

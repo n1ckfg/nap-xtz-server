@@ -337,7 +337,7 @@ function contactSheet(tiles) {
 
 function sheets(names, { out, encoder }) {
   const camera = makeCamera();
-  const shown = CANDIDATES.filter(([label]) => /legacy outline \.002|SHIPPED toBrushQuads/.test(label));
+  const shown = CANDIDATES.filter(([label]) => /legacy outline \.002|SHIPPED toBrushQuads|soup \(split quads\)/.test(label));
   fs.mkdirSync(out, { recursive: true });
 
   for (const [name, stroke] of selectStrokes(names)) {

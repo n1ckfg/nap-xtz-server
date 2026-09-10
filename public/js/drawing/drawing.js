@@ -1250,7 +1250,7 @@ function convertToNAPLPS() {
         .applyMatrix3(toStrokeSpace)
         .normalize();
 
-    // Every stroke's polygons at one simplification tolerance. Fresh Vector2s
+    // Every stroke's triangles at one simplification tolerance. Fresh Vector2s
     // each time: NapEncoder flips a point's y in place as it encodes, so a
     // second pass over the same objects would come out upside down.
     const buildInput = (epsilon) => {
@@ -1266,9 +1266,9 @@ function convertToNAPLPS() {
             const b = hex & 0xff;
             const color = new window.Vector3(r, g, b);
 
-            // One short filled polygon per segment of the stroke: see toBrushQuads()
-            for (const quad of stroke.toBrushQuads(project, widthAxis, epsilon)) {
-                const points2D = quad.map(p => new window.Vector2(p.x, p.y));
+            // The stroke as a soup of filled triangles: see toBrushTriangles()
+            for (const triangle of stroke.toBrushTriangles(project, widthAxis, epsilon)) {
+                const points2D = triangle.map(p => new window.Vector2(p.x, p.y));
                 input.push(new window.NapInputWrapper(color, points2D, true));
             }
         }
@@ -1315,7 +1315,7 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
-    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons) to ` +
+    console.log(`Converted ${frame.strokes.length} strokes (${input.length} triangles) to ` +
                 `${encoder.napRaw.length} bytes of NAPLPS`);
     return encoder.napRaw;
 }

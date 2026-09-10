@@ -490,16 +490,15 @@ export class Stroke {
     }
 
     /**
-     * The stroke as a run of short filled polygons -- one quad per segment of the
-     * simplified centreline -- in the 0..1 space NAPLPS draws in.
+     * The stroke as a run of quads -- one per segment of the simplified
+     * centreline -- in the 0..1 space NAPLPS draws in.
      *
-     * This is the shape the format wants. A quad built on one segment's own
-     * perpendicular is convex, so every renderer fills it alike whichever winding
-     * rule it uses, where a single long outline of the whole stroke crosses itself
-     * at every tight turn and fills differently on each. Four points is also short
-     * enough that the encoder's running delta cursor is reset before its rounding
-     * error can accumulate into visible drift. Consecutive quads reach a little
-     * way into each other -- see cornerReach() -- so no gap shows at a turn.
+     * A quad built on one segment's own perpendicular is convex, where a single
+     * long outline of the whole stroke crosses itself at every tight turn and
+     * fills differently on every renderer. Consecutive quads reach a little way
+     * into each other -- see cornerReach() -- so no gap shows at a turn.
+     *
+     * This is the shape; toBrushTriangles() is what gets encoded.
      *
      * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
      * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
@@ -562,6 +561,36 @@ export class Stroke {
         }
 
         return quads;
+    }
+
+    /**
+     * The same run, cut into triangles -- one filled polygon each. This is what
+     * convertToNAPLPS() encodes.
+     *
+     * A triangle cannot be anything but convex, so no renderer has an opinion
+     * about what to fill in it, where a quad has to be built carefully to earn
+     * that. Three points also hold the encoder's running delta cursor to the
+     * shortest run the format allows, since every point in a polygon after the
+     * first is a delta from the one before it.
+     *
+     * It costs about half again as many bytes as the quads it comes from, which
+     * is why convertToNAPLPS() watches the total and gives simplification
+     * tolerance back when a drawing won't fit the chain.
+     *
+     * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
+     * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
+     * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
+     * @returns {{x: number, y: number}[][]} Closed 3-point polygons, in drawing order
+     */
+    toBrushTriangles(project, widthAxis, epsilon = BRUSH_SIMPLIFY) {
+        const triangles = [];
+
+        for (const quad of this.toBrushQuads(project, widthAxis, epsilon)) {
+            const [a, b, c, d] = quad;
+            triangles.push([a, b, c], [a, c, d]);
+        }
+
+        return triangles;
     }
 }
 

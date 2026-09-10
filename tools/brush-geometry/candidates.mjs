@@ -136,6 +136,79 @@ export function shipped(stroke, camera, color, epsilon) {
     .map((points) => ({ color, points }));
 }
 
+/* ── polygon soup: one filled polygon per triangle ─────────────────────── */
+/**
+ * The shipped quads, each cut along a diagonal into two triangles, every
+ * triangle its own POLY FILLED. Same geometry, so what this measures is the
+ * cost and effect of the split alone: three-point polygons hold the encoder's
+ * delta cursor to an even shorter run, and a triangle cannot be anything but
+ * convex, where a quad relies on its construction for that.
+ */
+export function soup(stroke, camera, color, epsilon) {
+  const out = [];
+  for (const { points } of shipped(stroke, camera, color, epsilon)) {
+    if (points.length !== 4) {
+      out.push({ color, points });
+      continue;
+    }
+    const [a, b, c, d] = points;
+    out.push({ color, points: [a, b, c] });
+    out.push({ color, points: [a, c, d] });
+  }
+  return out;
+}
+
+/**
+ * The soup with the corner reach replaced by an explicit wedge triangle at each
+ * joint: two triangles per segment, one per corner. Once every polygon is a
+ * triangle anyway, the wedge costs no more than the overlap it replaces, and it
+ * fills the corner exactly rather than by covering it over.
+ */
+export function soupJoints(stroke, camera, color, epsilon = 0.002) {
+  const { centre, radii } = simplify(toScreenPath(stroke, camera), epsilon);
+  const out = [];
+
+  for (let i = 0; i < centre.length - 1; i++) {
+    const a = centre[i];
+    const b = centre[i + 1];
+    const t = unit(b.x - a.x, b.y - a.y);
+    if (!t) continue;
+
+    const ra = Math.max(radii[i], 1e-4);
+    const rb = Math.max(radii[i + 1], 1e-4);
+    const al = clampPoint({ x: a.x - t.y * ra, y: a.y + t.x * ra });
+    const ar = clampPoint({ x: a.x + t.y * ra, y: a.y - t.x * ra });
+    const bl = clampPoint({ x: b.x - t.y * rb, y: b.y + t.x * rb });
+    const br = clampPoint({ x: b.x + t.y * rb, y: b.y - t.x * rb });
+
+    out.push({ color, points: [al, bl, br] });
+    out.push({ color, points: [al, br, ar] });
+  }
+
+  // The wedge each pair of segments leaves on the outside of its corner
+  for (let i = 1; i < centre.length - 1; i++) {
+    const into = unit(centre[i].x - centre[i - 1].x, centre[i].y - centre[i - 1].y);
+    const outOf = unit(centre[i + 1].x - centre[i].x, centre[i + 1].y - centre[i].y);
+    if (!into || !outOf) continue;
+
+    const cross = into.x * outOf.y - into.y * outOf.x;
+    if (Math.abs(cross) < 1e-6) continue;
+
+    const side = cross > 0 ? -1 : 1; // the outside of the turn
+    const r = Math.max(radii[i], 1e-4);
+    out.push({
+      color,
+      points: [
+        clampPoint(centre[i]),
+        clampPoint({ x: centre[i].x - side * into.y * r, y: centre[i].y + side * into.x * r }),
+        clampPoint({ x: centre[i].x - side * outOf.y * r, y: centre[i].y + side * outOf.x * r })
+      ]
+    });
+  }
+
+  return out;
+}
+
 /* ── the shape it used to ship ─────────────────────────────────────────── */
 /**
  * The stroke as one closed outline offset in its own best-fit plane -- the
@@ -316,7 +389,10 @@ export const CANDIDATES = [
   // the other two bracket it, so the cost of that tolerance stays visible.
   ["SHIPPED toBrushQuads", (s, cam, col) => shipped(s, cam, col)],
   ["SHIPPED at .005", (s, cam, col) => shipped(s, cam, col, 0.005)],
-  ["SHIPPED at .01", (s, cam, col) => shipped(s, cam, col, 0.01)]
+  ["SHIPPED at .01", (s, cam, col) => shipped(s, cam, col, 0.01)],
+  ["soup (split quads)", (s, cam, col) => soup(s, cam, col)],
+  ["soup at .005", (s, cam, col) => soup(s, cam, col, 0.005)],
+  ["soup + joint wedges", (s, cam, col) => soupJoints(s, cam, col)]
 ];
 
 export { Stroke };
