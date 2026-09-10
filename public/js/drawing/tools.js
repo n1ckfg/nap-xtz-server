@@ -14,7 +14,7 @@ const TIP_RADIUS = 0.01;
 
 // The next three are in frame widths -- the 0..1 space toBrushQuads works in,
 // where 1 is the whole drawing, so 0.005 is about three pixels of a 640-wide one.
-const BRUSH_SIMPLIFY = 0.005; // how far simplification may move a point
+const BRUSH_SIMPLIFY = 0.002; //0.005; // how far simplification may move a point
 const MIN_STEP = 0.0005;      // 1/2048: a shorter step is a rounding error to the encoder
 const MIN_RADIUS = 0.0005;    // keeps a quad from collapsing into a line
 

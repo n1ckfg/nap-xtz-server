@@ -1,0 +1,90 @@
+# brush-geometry
+
+Measures what happens to a live-drawing brush stroke on its way through NAPLPS —
+how far the decoded shape has moved, whether any polygon crosses itself, what it
+costs in bytes — so a change to `Stroke.toBrushQuads()` can be judged by numbers
+rather than by squinting at a canvas.
+
+```
+node tools/brush-geometry/brush-geometry.mjs compare
+node tools/brush-geometry/brush-geometry.mjs compare scribble --encoder truncate
+node tools/brush-geometry/brush-geometry.mjs checks
+node tools/brush-geometry/brush-geometry.mjs sheets hairpin depth
+node tools/brush-geometry/brush-geometry.mjs draw
+```
+
+| Command | |
+| --- | --- |
+| `compare [stroke ...]` | scores every candidate geometry against the ideal brush |
+| `checks` | asserts the shipped `toBrushQuads` holds up at the edges; exits non-zero on a failure |
+| `sheets [stroke ...]` | writes side-by-side PNGs: ideal, the old outline, what ships now |
+| `draw` | draws four strokes through a real `Frame` and exports them end to end |
+
+| Option | |
+| --- | --- |
+| `-e, --encoder <mode>` | `file` (default), `round`, or `truncate` |
+| `-o, --out <dir>` | where `sheets` and `draw` write (default: `tools/brush-geometry/out`) |
+| `-h, --help` | usage, including what each column means |
+
+There are no dependencies beyond `three`, which the server already has. PNGs are
+written by `tools/thumbnail-maker`.
+
+## What it measures against
+
+Nothing here re-implements the format. `naplps.mjs` runs
+`public/js/telidon/naplps.js` — the browser's own encoder *and* decoder — in a
+`vm` context, so a candidate is scored against the code that will actually carry
+it, and a fix to either reaches this tool for free.
+
+The eight strokes in `strokes.mjs` are synthetic, each picked for something it
+does to a brush: a `spiral` long enough for delta error to accumulate in, a
+`hairpin` that turns tighter than the brush is wide, a `depth` sweep that travels
+toward the camera, an `edgeOn` stroke whose own plane is nearly degenerate, a
+dense `scribble` that overlaps itself. They are built through `Stroke.refine()`,
+so a hundred sampled points arrive as four hundred, as they do in the app.
+
+Each is scored against **the ideal brush**: the same stroke stamped at full
+resolution as one trapezoid per segment plus a disc at every point, filled a
+polygon at a time so no winding rule has an opinion about it.
+
+| column | |
+| --- | --- |
+| `drift px` | furthest a decoded vertex landed from the one that was encoded, in artwork pixels |
+| `dropped` | decoded points outside the frame, which `TelidonP5.js` and `Telidon.cpp` both discard |
+| `crossings` | times a polygon crosses itself — above zero, what gets filled depends on the renderer |
+| `roundtrip` | decoded shape vs the shape that went in |
+| `shape` | decoded shape vs the ideal brush; simplification is what costs a candidate here |
+| `rule-agree` | the same decoded shape filled nonzero vs even-odd — below 1.0 it looks different in a browser than in openFrameworks |
+
+The three ratios are intersection-over-union of the filled pixels, where 1.0 is
+identical coverage.
+
+## The encoder switch
+
+Every point in a polygon after the first is a *delta* from the one before it, so
+how `makeNapVector2` quantises a delta decides how far a long polygon wanders.
+`--encoder` rewrites that one expression while measuring — `truncate` for the
+form that always shortens a delta, `round` for the one that doesn't — which
+separates what a geometry costs from what the encoder costs. `file`, the
+default, leaves `naplps.js` as it stands and says which form that is.
+
+Nothing is written back: the rewrite happens on the source text on its way into
+the `vm`.
+
+## Adding a candidate
+
+A function in `candidates.mjs` returning `[{ color, points }]` in the 0..1 space
+the format draws in, plus a line in `CANDIDATES` at the foot of that file.
+`compare` picks the table up from that list. The candidates already there are
+the ones that were weighed before the current geometry was chosen — one long
+outline of the whole stroke (in 3D, as the code used to, and in 2D), the ribbon
+cut into overlapping chunks, and per-segment quads cornered with a mitre.
+
+## Known gaps
+
+- The strokes are synthetic. Nothing here replays a recording of a real hand.
+- `checks` covers the geometry, not the drawing mode around it: MediaPipe, the
+  gestures and the wallet are all out of frame.
+- The ideal brush has round joins and caps, which quads approximate with flat
+  ones, so `shape` tops out below 1.0 for every candidate. It is a number to
+  compare candidates by, not one to reach 1.000.
