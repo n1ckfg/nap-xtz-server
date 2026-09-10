@@ -128,36 +128,26 @@ function vertexNormal(centre, i) {
 }
 
 /* ── the shape the code ships ──────────────────────────────────────────── */
-/** Stroke.toBrushQuads() itself, driven the way drawing.js drives it. */
+/** Stroke.toBrushTriangles() itself, driven the way drawing.js drives it. */
 export function shipped(stroke, camera, color, epsilon) {
+  const axis = widthAxisFor(camera);
+  return stroke
+    .toBrushTriangles((p) => project(p, camera), axis, epsilon)
+    .map((points) => ({ color, points }));
+}
+
+/**
+ * The quads those triangles are cut from, encoded whole. Worth keeping in the
+ * table: it is what the split costs, measured against the thing it came from.
+ */
+export function quads(stroke, camera, color, epsilon) {
   const axis = widthAxisFor(camera);
   return stroke
     .toBrushQuads((p) => project(p, camera), axis, epsilon)
     .map((points) => ({ color, points }));
 }
 
-/* ── polygon soup: one filled polygon per triangle ─────────────────────── */
-/**
- * The shipped quads, each cut along a diagonal into two triangles, every
- * triangle its own POLY FILLED. Same geometry, so what this measures is the
- * cost and effect of the split alone: three-point polygons hold the encoder's
- * delta cursor to an even shorter run, and a triangle cannot be anything but
- * convex, where a quad relies on its construction for that.
- */
-export function soup(stroke, camera, color, epsilon) {
-  const out = [];
-  for (const { points } of shipped(stroke, camera, color, epsilon)) {
-    if (points.length !== 4) {
-      out.push({ color, points });
-      continue;
-    }
-    const [a, b, c, d] = points;
-    out.push({ color, points: [a, b, c] });
-    out.push({ color, points: [a, c, d] });
-  }
-  return out;
-}
-
+/* ── an alternative tessellation ───────────────────────────────────────── */
 /**
  * The soup with the corner reach replaced by an explicit wedge triangle at each
  * joint: two triangles per segment, one per corner. Once every polygon is a
@@ -387,12 +377,12 @@ export const CANDIDATES = [
   ["mitred .002", (s, cam, col) => mitred(s, cam, col, 0.002)],
   // The first of these is tools.js's own BRUSH_SIMPLIFY, whatever it is set to;
   // the other two bracket it, so the cost of that tolerance stays visible.
-  ["SHIPPED toBrushQuads", (s, cam, col) => shipped(s, cam, col)],
+  ["SHIPPED triangles", (s, cam, col) => shipped(s, cam, col)],
   ["SHIPPED at .005", (s, cam, col) => shipped(s, cam, col, 0.005)],
   ["SHIPPED at .01", (s, cam, col) => shipped(s, cam, col, 0.01)],
-  ["soup (split quads)", (s, cam, col) => soup(s, cam, col)],
-  ["soup at .005", (s, cam, col) => soup(s, cam, col, 0.005)],
-  ["soup + joint wedges", (s, cam, col) => soupJoints(s, cam, col)]
+  ["unsplit quads", (s, cam, col) => quads(s, cam, col)],
+  ["unsplit quads at .005", (s, cam, col) => quads(s, cam, col, 0.005)],
+  ["tri + joint wedges", (s, cam, col) => soupJoints(s, cam, col)]
 ];
 
 export { Stroke };
