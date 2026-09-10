@@ -83,6 +83,7 @@ The frontend is a single-page app (`index.html`) offering several modes of inter
 - Tezos wallet connection and minting UI
 - A "Live Drawing" button to launch the 3D drawing mode overlay
 - A "latest" link that loads the newest on-chain drawing. Clicking it also sends that drawing to the Raspberry Pi via `NapClient.sendToRpi()` — a deliberate choice to change what is on screen, so the Pi follows. The same load runs automatically when the page opens, and that one leaves the Pi alone.
+- Left and right arrow keys, in review mode, read back and forth along the chain: left for the token minted before the one on screen, right for the one after. They come alive once a token has arrived from the chain — the load on page open is enough — and stop at the two ends, #0 and the newest mint the backend has announced. Each token they bring up goes to the Pi as well, for the reason the "latest" link does. A drawing from anywhere else — a dropped file, a peer's — leaves the position where it was, so the arrows carry on along the chain rather than from whatever last landed on the canvas. Drawing mode keeps the keyboard to itself.
 - Slideshow mode, which plays a random `.nap` from `./images` on an interval. While it runs, each frame it draws is also sent to the Raspberry Pi via `NapClient.sendToRpi()`, so the Pi shows what the page shows. Loading other content, or entering live drawing, stops the slideshow and the sending with it.
 
 ### JavaScript Modules
@@ -95,7 +96,7 @@ The frontend is a single-page app (`index.html`) offering several modes of inter
 - `client.js` - `NapClient` handles the WebSocket connection to the backend and parses incoming `naplps` messages. It never communicates with the Tezos RPC or TzKT directly. `sendToRpi()` and `rpiCommand()` reach the Raspberry Pi the same way: by asking the backend, which is the only side that knows whether a Pi exists or where it lives.
 
 **`js/tezos/` (Web3 & Wallets)**
-- `tezos.js` - Beacon SDK integration. Connects to the user's browser wallet (e.g., Temple), receives the unsigned payload from the backend via `POST /api/tezos/mint-params`, and prompts the user to sign and broadcast.
+- `tezos.js` - Beacon SDK integration. Connects to the user's browser wallet (e.g., Temple), receives the unsigned payload from the backend via `POST /api/tezos/mint-params`, and prompts the user to sign and broadcast. It also keeps the reader's place on the chain — the id on screen and the newest one known — and `stepToken()` moves it; `index.html` owns the key handling, as it does for "h". An id the backend answers 404 for (a mint from some other tool, with no `naplps` in its metadata) would otherwise trap the arrows on the gap, so the position moves onto it anyway and the next press continues past.
 
 There are two routes to a mint, and `GET /api/config`'s `serverSigning` flag picks between them. When the backend holds a key, `mintCurrentNaplps()` posts to `POST /api/tezos/mint` and the server signs — no wallet, no popup, which is the only way the gesture mint works unattended. A connected wallet still owns the token; with none connected, the server's own address does. Without a server key it falls back to the Beacon route, which prompts for every operation — Temple has no blanket pre-approval to switch off.
 

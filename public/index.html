@@ -582,13 +582,23 @@
 			}
 		});
 
+		// "h" for the chrome, and the arrow keys to read along the chain. Both
+		// stay out of the way of a key being typed into the NAPLPS field.
 		document.addEventListener("keydown", function(e) {
-			if (e.key !== "h" && e.key !== "H") return;
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
-			// Don't swallow an "h" the user is typing into the NAPLPS field.
 			const t = e.target;
 			if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-			toggleUI();
+
+			if (e.key === "h" || e.key === "H") {
+				toggleUI();
+			} else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+				// Left for the token minted before the one on screen, right for the
+				// one after (js/tezos/tezos.js holds the position). Review mode only:
+				// in drawing mode the keyboard belongs to the drawing.
+				if (liveDrawingActive) return;
+				e.preventDefault(); // the arrows would scroll the page otherwise
+				stepToken(e.key === "ArrowLeft" ? -1 : 1);
+			}
 		});
 
 		function hexToRgb(hex) {

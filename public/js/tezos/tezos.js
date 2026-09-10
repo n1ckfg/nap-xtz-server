@@ -63,6 +63,7 @@ async function initTezos() {
         NapClient.onNaplps(function(message) {
             loadTelidonFromText(message.naplps);
             if (message.source === "chain") {
+                noteTokenShown(message.id); // a new mint becomes the arrow keys' right-hand end
                 const link = message.link || (_config.explorerBase + "/" + _config.contract + "/operations/");
                 setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
                           'Token #' + message.id + "</a> loaded from chain");
@@ -247,6 +248,23 @@ async function serverMint(napRaw) {
 // as well as this canvas, the way slideshow frames go out. The automatic load
 // when the page opens leaves the Pi alone -- reloading a browser is not a
 // decision to change what the Pi is showing.
+//
+// Two ids say where the arrow keys are. `_currentTokenId` is the token on the
+// canvas and stays null until one has arrived from the chain -- which is what
+// keeps the arrows quiet on a page showing only a dropped file. `_latestTokenId`
+// is the far end, and moves as the watcher announces new mints. Neither is
+// disturbed by a drawing from anywhere else, so a dropped file or a peer's
+// drawing leaves the reader where it was on the chain.
+let _currentTokenId = null;
+let _latestTokenId  = null;
+let _tokenLoading   = false;   // one read at a time, so a held arrow key can't queue them
+
+function noteTokenShown(id) {
+    if (typeof id !== "number" || isNaN(id)) return;
+    _currentTokenId = id;
+    if (_latestTokenId === null || id > _latestTokenId) _latestTokenId = id;
+}
+
 async function loadLatestToken(toRpi) {
     try {
         setStatus("Loading latest token from chain...");
@@ -254,6 +272,7 @@ async function loadLatestToken(toRpi) {
         console.log("[nap-xtz] loaded from chain, NAPLPS length:", token.naplps.length);
         loadTelidonFromText(token.naplps);
         if (toRpi) NapClient.sendToRpi(token.naplps, "latest");
+        noteTokenShown(token.id);
 
         const link = token.link || "#";
         setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
@@ -262,4 +281,58 @@ async function loadLatestToken(toRpi) {
         console.warn("[nap-xtz] loadLatestToken error:", e);
         setStatus("Chain read failed — using local samples");
     }
+}
+
+// One token by id, which is how the arrow keys read. It goes to the Pi as well,
+// for the same reason the "latest" link does: pressing an arrow is a decision to
+// change what is on screen, and the Pi follows the screen.
+async function loadToken(id) {
+    if (_tokenLoading) return;
+    _tokenLoading = true;
+    try {
+        setStatus("Loading token #" + id + " from chain...");
+        const token = await NapClient.getToken(id);
+        console.log("[nap-xtz] loaded token #" + id + ", NAPLPS length:", token.naplps.length);
+        loadTelidonFromText(token.naplps);
+        NapClient.sendToRpi(token.naplps, "browse");
+        noteTokenShown(token.id);
+
+        const link = token.link || "#";
+        setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
+                  "Token #" + token.id + "</a> loaded from chain");
+    } catch (e) {
+        console.warn("[nap-xtz] loadToken " + id + ":", e);
+        if (e.status === 404) {
+            // An id with no drawing behind it -- minted by some other tool, with
+            // no naplps in its metadata. The position moves onto the gap anyway,
+            // so the next press carries on past it instead of hitting it again.
+            _currentTokenId = id;
+            setStatus("Token #" + id + " has nothing to show", true);
+        } else {
+            // A read that failed: stay put, and the same key tries again.
+            setStatus("Token #" + id + " could not be read", true);
+        }
+    } finally {
+        _tokenLoading = false;
+    }
+}
+
+// A step back or forward along the chain -- the arrow keys in review mode (the
+// handler is in index.html, with the rest of the key handling). Before the first
+// chain read there is no position to step from, and at either end there is
+// nowhere to go, so those presses only say why.
+function stepToken(delta) {
+    if (_currentTokenId === null || _tokenLoading) return;
+
+    const id = _currentTokenId + delta;
+    if (id < 0) {
+        setStatus("Token #0 is the earliest on chain");
+        return;
+    }
+    if (_latestTokenId !== null && id > _latestTokenId) {
+        setStatus("Token #" + _latestTokenId + " is the newest on chain");
+        return;
+    }
+
+    loadToken(id);
 }

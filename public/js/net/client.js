@@ -15,7 +15,11 @@ const NapClient = (function() {
         const res = await fetch(path, options);
         let body = null;
         try { body = await res.json(); } catch (e) { /* empty or non-JSON body */ }
-        if (!res.ok) throw new Error((body && body.error) || (path + " failed: " + res.status));
+        if (!res.ok) {
+            const err = new Error((body && body.error) || (path + " failed: " + res.status));
+            err.status = res.status; // lets a caller tell "not there" from "went wrong"
+            throw err;
+        }
         return body;
     }
 
