@@ -11,6 +11,7 @@ node tools/brush-geometry/brush-geometry.mjs compare scribble --encoder truncate
 node tools/brush-geometry/brush-geometry.mjs checks
 node tools/brush-geometry/brush-geometry.mjs sheets hairpin depth
 node tools/brush-geometry/brush-geometry.mjs draw
+node tools/brush-geometry/brush-geometry.mjs loss
 ```
 
 | Command | |
@@ -19,6 +20,7 @@ node tools/brush-geometry/brush-geometry.mjs draw
 | `checks` | asserts the shipped `toBrushQuads` holds up at the edges; exits non-zero on a failure |
 | `sheets [stroke ...]` | writes side-by-side PNGs: ideal, the old outline, what ships now |
 | `draw` | draws strokes through a real `Frame` and exports them end to end, budget ladder included |
+| `loss [stroke ...]` | how much of a stroke survives when polygons go missing, at each `BRUSH_OVERLAP_PASSES` setting |
 
 | Option | |
 | --- | --- |
@@ -113,3 +115,30 @@ and `no quad split`.
 - The ideal brush has round joins and caps, which quads approximate with flat
   ones, so `shape` tops out below 1.0 for every candidate. It is a number to
   compare candidates by, not one to reach 1.000.
+
+## What `loss` is for
+
+`toBrushQuads()` lays a staggered run of quads over the plain one so that a
+polygon lost between here and the Pi leaves paint behind it rather than a notch.
+`loss` is that premise measured rather than assumed: it builds each stroke at 0,
+1 and 2 overlap passes, throws polygons away, and reports how much of the
+intended paint is still on the canvas.
+
+It throws them away two ways, because they punish redundancy differently.
+**Random** loss takes each polygon independently, which staggering covers well —
+the quad over a gap is a different draw from the one that went. **Burst** loss
+takes a contiguous run of the command stream, which is what a parser giving up
+partway through looks like, and it is only covered if the two runs are far
+enough apart in the stream. That is why the staggered run follows the plain one
+whole instead of interleaving with it, and the burst column is what would show
+the cost of changing that.
+
+Over the eight strokes, a fifth of the stream lost in one burst:
+
+| passes | polygons | bytes | paint left |
+| --- | --- | --- | --- |
+| 0 | 305 | 5257 | 0.802 |
+| 1 | 618 | 10466 | 0.972 |
+| 2 | 932 | 15684 | 0.984 |
+
+The second pass buys much less than the first, for the same price again.

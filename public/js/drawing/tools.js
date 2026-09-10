@@ -29,6 +29,19 @@ const QUAD_SAFE_HEIGHT = 4 * MIN_STEP;
 // both renderers drop a point that lands outside rather than pulling it back.
 const FRAME_MARGIN = 4 * MIN_STEP;
 
+// Extra runs of quads laid over the stroke, each offset along it by an even
+// fraction of a segment, so a polygon that goes missing on the way to the Pi
+// leaves a covered gap rather than a notch in the stroke. A staggered run's
+// joints fall where the plain run's segments are straight and its segments
+// straddle the plain run's joints, so the two cover each other's weak points
+// rather than the same one twice.
+//
+// 0 is the plain run. Each pass adds about as many polygons as the plain run
+// has, and the byte ladder in convertToNAPLPS() coarsens the brush if that puts
+// a drawing over the mint limit -- so redundancy is paid for in detail, not in
+// drawings that won't fit.
+export const BRUSH_OVERLAP_PASSES = 1;
+
 /**
  * Ramer-Douglas-Peucker, over indices rather than points so that anything held
  * per point -- here the brush radius -- can follow the centreline through it.
@@ -175,6 +188,84 @@ function touchesFrame(poly) {
     const ys = poly.map(p => p.y);
     return Math.min(...xs) <= 1 && Math.max(...xs) >= 0 &&
            Math.min(...ys) <= 1 && Math.max(...ys) >= 0;
+}
+
+/**
+ * One quad per segment of a centreline, each on its own segment's perpendicular
+ * and reaching a little way into its neighbours so no gap shows at a turn. Both
+ * the plain run and every staggered overlap run are built by this, so the two
+ * are the same shape and differ only in where their joints fall.
+ * @param {{x: number, y: number}[]} points
+ * @param {number[]} radii
+ * @returns {{x: number, y: number}[][]} Closed 4-point polygons, in drawing order
+ */
+function quadsAlong(points, radii) {
+    const lastSegment = points.length - 2;
+    const reach = cornerReach(points, radii);
+    const quads = [];
+
+    for (let i = 0; i <= lastSegment; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        const length = Math.hypot(b.x - a.x, b.y - a.y);
+        if (length < MIN_STEP) continue;
+
+        const tx = (b.x - a.x) / length;
+        const ty = (b.y - a.y) / length;
+        const ra = Math.max(radii[i], MIN_RADIUS);
+        const rb = Math.max(radii[i + 1], MIN_RADIUS);
+
+        // Reach into the neighbouring segments, but not past the run's own ends
+        const back = i > 0 ? reach[i] : 0;
+        const forward = i < lastSegment ? reach[i + 1] : 0;
+        const ax = a.x - tx * back;
+        const ay = a.y - ty * back;
+        const bx = b.x + tx * forward;
+        const by = b.y + ty * forward;
+
+        const quad = [
+            { x: ax - ty * ra, y: ay + tx * ra },
+            { x: bx - ty * rb, y: by + tx * rb },
+            { x: bx + ty * rb, y: by - tx * rb },
+            { x: ax + ty * ra, y: ay - tx * ra }
+        ];
+
+        // The encoder silently drops a point outside the frame, and every point
+        // after it in that polygon is a delta from the one dropped, so the rest
+        // of the shape lands somewhere else entirely. Keep the quads that touch
+        // the frame and clamp them into it; skip the rest.
+        if (touchesFrame(quad)) quads.push(quad.map(clampToFrame));
+    }
+
+    return quads;
+}
+
+/**
+ * The centreline resampled `t` of the way along each of its segments, with the
+ * two ends kept -- the path a staggered overlap run is built on. At t = 0.5 its
+ * points sit at the middle of each segment, so its joints land where the plain
+ * run is straight and its segments straddle the plain run's joints. Keeping the
+ * ends means the tips of the stroke are covered twice as well.
+ * @param {{x: number, y: number}[]} points
+ * @param {number[]} radii
+ * @param {number} t - Where along each segment to sample, 0..1
+ * @returns {{points: {x: number, y: number}[], radii: number[]}}
+ */
+function staggerPath(points, radii, t) {
+    const last = points.length - 1;
+    const out = { points: [points[0]], radii: [radii[0]] };
+
+    for (let i = 0; i < last; i++) {
+        out.points.push({
+            x: points[i].x + (points[i + 1].x - points[i].x) * t,
+            y: points[i].y + (points[i + 1].y - points[i].y) * t
+        });
+        out.radii.push(radii[i] + (radii[i + 1] - radii[i]) * t);
+    }
+
+    out.points.push(points[last]);
+    out.radii.push(radii[last]);
+    return out;
 }
 
 /**
@@ -546,52 +637,32 @@ export class Stroke {
      * fills differently on every renderer. Consecutive quads reach a little way
      * into each other -- see cornerReach() -- so no gap shows at a turn.
      *
+     * `passes` staggered runs follow the plain one, offset half a segment along
+     * the stroke, so every part of it is covered by more than one polygon and a
+     * polygon lost on the way to the Pi leaves paint behind it. See
+     * BRUSH_OVERLAP_PASSES.
+     *
      * This is the shape; toBrushPolygons() is what gets encoded.
      *
      * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
      * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
      * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
+     * @param {number} [passes=BRUSH_OVERLAP_PASSES] - staggered overlap runs to lay
+     *     over the plain one, each covering the joints of the last
      * @returns {{x: number, y: number}[][]} Closed 4-point polygons, in drawing order
      */
-    toBrushQuads(project, widthAxis, epsilon = BRUSH_SIMPLIFY) {
+    toBrushQuads(project, widthAxis, epsilon = BRUSH_SIMPLIFY, passes = BRUSH_OVERLAP_PASSES) {
         if (this.points.length < 2) return [];
 
         const { points, radii } = simplifyPath(this.toScreenPath(project, widthAxis), epsilon);
-        const lastSegment = points.length - 2;
-        const reach = cornerReach(points, radii);
-        const quads = [];
+        const quads = quadsAlong(points, radii);
 
-        for (let i = 0; i <= lastSegment; i++) {
-            const a = points[i];
-            const b = points[i + 1];
-            const length = Math.hypot(b.x - a.x, b.y - a.y);
-            if (length < MIN_STEP) continue;
-
-            const tx = (b.x - a.x) / length;
-            const ty = (b.y - a.y) / length;
-            const ra = Math.max(radii[i], MIN_RADIUS);
-            const rb = Math.max(radii[i + 1], MIN_RADIUS);
-
-            // Reach into the neighbouring segments, but not past the stroke's own ends
-            const back = i > 0 ? reach[i] : 0;
-            const forward = i < lastSegment ? reach[i + 1] : 0;
-            const ax = a.x - tx * back;
-            const ay = a.y - ty * back;
-            const bx = b.x + tx * forward;
-            const by = b.y + ty * forward;
-
-            const quad = [
-                { x: ax - ty * ra, y: ay + tx * ra },
-                { x: bx - ty * rb, y: by + tx * rb },
-                { x: bx + ty * rb, y: by - tx * rb },
-                { x: ax + ty * ra, y: ay - tx * ra }
-            ];
-
-            // The encoder silently drops a point outside the frame, and every
-            // point after it in that polygon is a delta from the one dropped, so
-            // the rest of the shape lands somewhere else entirely. Keep the quads
-            // that touch the frame and clamp them into it; skip the rest.
-            if (touchesFrame(quad)) quads.push(quad.map(clampToFrame));
+        // Each staggered run is laid down after the whole plain run rather than
+        // beside the quads it covers, so a loss that takes a contiguous stretch
+        // of the stream still leaves the cover for it further along.
+        for (let pass = 1; pass <= passes && points.length >= 2; pass++) {
+            const stagger = staggerPath(points, radii, pass / (passes + 1));
+            quads.push(...quadsAlong(stagger.points, stagger.radii));
         }
 
         // A stroke can land on a single spot -- drawn straight at the camera, or
@@ -632,12 +703,14 @@ export class Stroke {
      * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
      * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
      * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
+     * @param {number} [passes=BRUSH_OVERLAP_PASSES] - staggered overlap runs to lay
+     *     over the plain one, each covering the joints of the last
      * @returns {{x: number, y: number}[][]} Closed polygons of three or four points, in drawing order
      */
-    toBrushPolygons(project, widthAxis, epsilon = BRUSH_SIMPLIFY) {
+    toBrushPolygons(project, widthAxis, epsilon = BRUSH_SIMPLIFY, passes = BRUSH_OVERLAP_PASSES) {
         const polygons = [];
 
-        for (const quad of this.toBrushQuads(project, widthAxis, epsilon)) {
+        for (const quad of this.toBrushQuads(project, widthAxis, epsilon, passes)) {
             if (cornerHeight(quad) >= QUAD_SAFE_HEIGHT) {
                 polygons.push(quad);
             } else {

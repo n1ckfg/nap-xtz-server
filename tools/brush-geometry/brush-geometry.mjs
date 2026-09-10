@@ -7,6 +7,7 @@ brush-geometry — measures how a drawing-mode brush stroke survives NAPLPS.
     node tools/brush-geometry/brush-geometry.mjs checks
     node tools/brush-geometry/brush-geometry.mjs sheets hairpin depth
     node tools/brush-geometry/brush-geometry.mjs draw
+    node tools/brush-geometry/brush-geometry.mjs loss
 
 Every stroke is encoded and decoded by public/js/telidon/naplps.js itself, so
 what the table reports is what the browser and the Pi will get.
@@ -37,6 +38,8 @@ Commands:
   sheets [stroke ...]    write side-by-side PNGs: ideal, the old outline, shipped
   draw                   draw strokes through a real Frame, end to end, with
                          the byte budget ladder convertToNAPLPS() runs
+  loss [stroke ...]      how much of a stroke survives when polygons go missing,
+                         at each BRUSH_OVERLAP_PASSES setting
 
 Strokes: ${Object.keys(STROKES).join(", ")} (default: all)
 
@@ -472,6 +475,131 @@ function draw({ out, encoder, limit, strokes: strokeCount, tolerance }) {
   console.log(path.join(out, "draw.png"));
 }
 
+/* ── loss ──────────────────────────────────────────────────────────────── */
+/**
+ * What survives when polygons go missing between here and the Pi.
+ *
+ * The overlap runs in toBrushQuads() are there on the premise that a stroke
+ * covered twice keeps its shape when part of it is lost. This is that premise
+ * measured: build a stroke at each pass count, throw polygons away, and see how
+ * much of the intended paint is still on the canvas.
+ *
+ * Two ways of losing them, because they punish redundancy differently. Random
+ * loss takes polygons independently, which staggering covers well -- the quad
+ * over a gap is a different draw from the one that went. Burst loss takes a
+ * contiguous run of the command stream, which is what a parser giving up partway
+ * looks like, and it can only be covered if the two runs are far enough apart in
+ * the stream, which is why the staggered run follows the plain one whole rather
+ * than interleaving with it.
+ */
+function mulberry32(seed) {
+  return function () {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function covered(survivors, intendedMask) {
+  const mask = maskOf(survivors, { rule: "nonzero" });
+  let kept = 0;
+  let want = 0;
+  for (let i = 0; i < mask.length; i++) {
+    if (intendedMask[i]) {
+      want++;
+      if (mask[i]) kept++;
+    }
+  }
+  return want === 0 ? 1 : kept / want;
+}
+
+const LOSS_RATES = [0.05, 0.1, 0.2];
+const LOSS_TRIALS = 24;
+const LOSS_PASSES = [0, 1, 2];
+
+function loss(names, { encoder }) {
+  const camera = makeCamera();
+  const projectPoint = (p) => project(p, camera);
+  const axis = widthAxisFor(camera);
+  const strokes = selectStrokes(names);
+
+  console.log(`encoder: ${encoder === "file" ? `${encoderInFile()} (as naplps.js has it)` : encoder}`);
+  console.log(`\nPaint still on the canvas after polygons are lost, ${LOSS_TRIALS} trials each.`);
+  console.log("1.000 is the whole stroke; passes 1 is what tools.js ships.\n");
+
+  const head =
+    "passes  polys   bytes   " + LOSS_RATES.map((r) => `rand ${(r * 100).toFixed(0)}%`).join("  ") +
+    "   " + LOSS_RATES.map((r) => `burst ${(r * 100).toFixed(0)}%`).join("  ");
+
+  const totals = new Map(LOSS_PASSES.map((n) => [n, { polys: 0, bytes: 0, rand: LOSS_RATES.map(() => 0), burst: LOSS_RATES.map(() => 0) }]));
+
+  for (const [name, stroke] of strokes) {
+    console.log(`## ${name}`);
+    console.log(head);
+
+    for (const passes of LOSS_PASSES) {
+      const polys = stroke
+        .toBrushPolygons(projectPoint, axis, BRUSH_SIMPLIFY, passes)
+        .map((points) => ({ color: COLOR, points }));
+      if (polys.length === 0) continue;
+
+      // The shape as sent, decoded, which is the most any loss could leave
+      const sent = decodePolys(encodePolys(polys, { encoder }), { encoder });
+      const intended = maskOf(sent.map((p) => p.points), { rule: "nonzero" });
+      const bytes = encodePolys(polys, { encoder }).length;
+
+      const random = [];
+      const bursts = [];
+
+      for (const rate of LOSS_RATES) {
+        const drop = Math.max(1, Math.round(sent.length * rate));
+        let randSum = 0;
+        let burstSum = 0;
+
+        for (let trial = 0; trial < LOSS_TRIALS; trial++) {
+          const rng = mulberry32(trial * 7919 + passes * 104729 + Math.round(rate * 1000));
+
+          // Independent loss: each polygon takes its own chance
+          const kept = sent.filter(() => rng() >= rate).map((p) => p.points);
+          randSum += covered(kept, intended);
+
+          // Burst loss: one contiguous run of the command stream goes
+          const start = Math.floor(rng() * Math.max(1, sent.length - drop));
+          const survived = sent.filter((_, i) => i < start || i >= start + drop).map((p) => p.points);
+          burstSum += covered(survived, intended);
+        }
+
+        random.push(randSum / LOSS_TRIALS);
+        bursts.push(burstSum / LOSS_TRIALS);
+      }
+
+      const total = totals.get(passes);
+      total.polys += sent.length;
+      total.bytes += bytes;
+      random.forEach((v, i) => (total.rand[i] += v));
+      bursts.forEach((v, i) => (total.burst[i] += v));
+
+      console.log(
+        `${String(passes).padStart(6)} ${String(sent.length).padStart(6)} ${String(bytes).padStart(7)}   ` +
+        random.map((v) => v.toFixed(3).padStart(8)).join("  ") + "   " +
+        bursts.map((v) => v.toFixed(3).padStart(9)).join("  ")
+      );
+    }
+    console.log("");
+  }
+
+  console.log(`## all ${strokes.length} strokes  (means)`);
+  console.log(head);
+  for (const [passes, t] of totals) {
+    console.log(
+      `${String(passes).padStart(6)} ${String(t.polys).padStart(6)} ${String(t.bytes).padStart(7)}   ` +
+      t.rand.map((v) => (v / strokes.length).toFixed(3).padStart(8)).join("  ") + "   " +
+      t.burst.map((v) => (v / strokes.length).toFixed(3).padStart(9)).join("  ")
+    );
+  }
+}
+
 /* ── cli ───────────────────────────────────────────────────────────────── */
 function main() {
   const { values, positionals } = parseArgs({
@@ -527,6 +655,9 @@ function main() {
         break;
       case "draw":
         draw(options);
+        break;
+      case "loss":
+        loss(names, options);
         break;
       default:
         console.error(`Unknown command: ${command}\n`);
