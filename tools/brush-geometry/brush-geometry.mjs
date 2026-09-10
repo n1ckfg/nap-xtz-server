@@ -20,10 +20,10 @@ import * as THREE from "three";
 import { Canvas } from "../thumbnail-maker/raster.mjs";
 import { renderNap } from "../thumbnail-maker/render.mjs";
 import { encodePNG } from "../thumbnail-maker/png.mjs";
-import { encodePolys, decodePolys, encoderInFile, maskOf, score, ART } from "./naplps.mjs";
+import { encodePolys, decodePolys, encoderInFile, maskOf, score, selfIntersections, ART } from "./naplps.mjs";
 import { CANDIDATES, Stroke, brushReference, makeCamera, project, quads, shipped, widthAxisFor } from "./candidates.mjs";
-import { STROKES, buildStroke, selectStrokes } from "./strokes.mjs";
-import { Frame, BRUSH_SIMPLIFY } from "../../public/js/drawing/tools.js";
+import { STROKES, buildStroke, selectStrokes, stressStrokes } from "./strokes.mjs";
+import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from "../../public/js/drawing/tools.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_OUT = path.join(here, "out");
@@ -45,6 +45,8 @@ Options:
                          makeNapVector2's quantisation while measuring
   -o, --out <dir>        where sheets and draw write (default: tools/brush-geometry/out)
   -l, --limit <bytes>    draw: the mint limit to fit under (default: 30000)
+  -t, --tolerance <n>    draw: where the ladder starts (default: tools.js's
+                         BRUSH_SIMPLIFY); 0 is the brush that keeps every point
   -s, --strokes <n>      draw: how many strokes to draw (default: 4)
   -h, --help             show this message
 
@@ -139,7 +141,7 @@ function checks({ encoder }) {
     for (const p of points) stroke.addPoint(new THREE.Vector3(...p));
     return stroke;
   };
-  const trianglesOf = (points) => rawStroke(points).toBrushTriangles(projectPoint, axis);
+  const polygonsOf = (points) => rawStroke(points).toBrushPolygons(projectPoint, axis);
 
   const check = (name, fn) => {
     try {
@@ -155,45 +157,45 @@ function checks({ encoder }) {
   };
 
   check("empty stroke", () => {
-    assert(trianglesOf([]).length === 0, "expected no triangles");
+    assert(polygonsOf([]).length === 0, "expected no polygons");
   });
 
   check("single point", () => {
-    assert(trianglesOf([[0, 0, 0]]).length === 0, "expected no triangles");
+    assert(polygonsOf([[0, 0, 0]]).length === 0, "expected no polygons");
   });
 
   check("two points", () => {
-    const triangles = trianglesOf([[-1, 0, 0], [1, 0, 0]]);
-    assert(triangles.length === 2, `expected 2 triangles, got ${triangles.length}`);
-    assert(triangles.every((t) => t.length === 3), "a triangle should have three points");
-    return "one segment, 2 triangles";
+    const polys = polygonsOf([[-1, 0, 0], [1, 0, 0]]);
+    assert(polys.length >= 1, `expected a polygon, got ${polys.length}`);
+    assert(polys.every((p) => p.length === 3 || p.length === 4), "polygons should be tris or quads");
+    return `one segment, ${polys.length} polygon(s) of ${polys.map((p) => p.length).join("+")} points`;
   });
 
   check("held still: a dab, not nothing", () => {
-    const triangles = trianglesOf(Array(20).fill([0.5, 0.5, 0]));
-    assert(triangles.every((t) => t.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))), "NaN in the output");
-    assert(triangles.length === 2, `a dab is two triangles, got ${triangles.length}`);
-    const xs = triangles.flat().map((p) => p.x);
+    const polys = polygonsOf(Array(20).fill([0.5, 0.5, 0]));
+    assert(polys.every((t) => t.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))), "NaN in the output");
+    assert(polys.length >= 1, `a held stroke should leave a dab, got ${polys.length}`);
+    const xs = polys.flat().map((p) => p.x);
     return `${((Math.max(...xs) - Math.min(...xs)) * ART).toFixed(1)}px across`;
   });
 
   check("drawn straight at the camera", () => {
     const points = [];
     for (let i = 0; i < 30; i++) points.push([0, 0, -3 + (6 * i) / 29]);
-    const triangles = trianglesOf(points);
-    assert(triangles.length > 0, "the whole stroke vanished");
-    const areas = triangles.map((q) => {
+    const polys = polygonsOf(points);
+    assert(polys.length > 0, "the whole stroke vanished");
+    const areas = polys.map((q) => {
       const xs = q.map((p) => p.x);
       const ys = q.map((p) => p.y);
       return (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
     });
     assert(Math.max(...areas) > 1e-6, `nothing visible: largest area ${Math.max(...areas)}`);
-    return `${triangles.length} triangle(s), largest ${(Math.sqrt(Math.max(...areas)) * ART).toFixed(1)}px across`;
+    return `${polys.length} polygon(s), largest ${(Math.sqrt(Math.max(...areas)) * ART).toFixed(1)}px across`;
   });
 
   check("entirely off screen", () => {
-    const triangles = trianglesOf([[-40, 20, 0], [-38, 22, 0], [-36, 20, 0]]);
-    assert(triangles.length === 0, `expected nothing, got ${triangles.length} triangles`);
+    const polys = polygonsOf([[-40, 20, 0], [-38, 22, 0], [-36, 20, 0]]);
+    assert(polys.length === 0, `expected nothing, got ${polys.length} polygons`);
   });
 
   check("half off screen: every point inside the frame, encoded and decoded", () => {
@@ -215,17 +217,17 @@ function checks({ encoder }) {
       }
       const stroke = rawStroke(points);
       stroke.refine();
-      const triangles = stroke.toBrushTriangles(projectPoint, axis);
-      if (triangles.length === 0) continue;
-      polyCount += triangles.length;
+      const polys = stroke.toBrushPolygons(projectPoint, axis);
+      if (polys.length === 0) continue;
+      polyCount += polys.length;
 
-      for (const triangle of triangles) {
-        for (const p of triangle) {
+      for (const poly of polys) {
+        for (const p of poly) {
           assert(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1, `encoded point outside the frame: ${p.x}, ${p.y}`);
         }
       }
 
-      const nap = encodePolys(triangles.map((points2D) => ({ color: COLOR, points: points2D })), { encoder });
+      const nap = encodePolys(polys.map((points2D) => ({ color: COLOR, points: points2D })), { encoder });
       for (const cmd of decodePolys(nap, { encoder })) {
         for (const p of cmd.points) {
           decodedPoints++;
@@ -233,22 +235,45 @@ function checks({ encoder }) {
         }
       }
     }
-    return `${polyCount} triangles over 16 directions, ${decodedPoints} points all inside`;
+    return `${polyCount} polygons over 16 directions, ${decodedPoints} points all inside`;
   });
 
   check("the encoder drops nothing", () => {
     const stroke = buildStroke(STROKES.scribble);
-    const triangles = stroke.toBrushTriangles(projectPoint, axis);
-    const nap = encodePolys(triangles.map((points) => ({ color: COLOR, points })), { encoder });
+    const stressPolys = stroke.toBrushPolygons(projectPoint, axis);
+    const nap = encodePolys(stressPolys.map((points) => ({ color: COLOR, points })), { encoder });
     const decoded = decodePolys(nap, { encoder });
-    assert(decoded.length === triangles.length, `encoded ${triangles.length} polygons, decoded ${decoded.length}`);
-    for (const cmd of decoded) {
-      assert(cmd.points.length === 3, `a polygon came back with ${cmd.points.length} points`);
-    }
-    return `${triangles.length} triangles, ${nap.length} bytes`;
+    assert(decoded.length === stressPolys.length, `encoded ${stressPolys.length} polygons, decoded ${decoded.length}`);
+    decoded.forEach((cmd, i) => {
+      assert(cmd.points.length === stressPolys[i].length,
+             `a ${stressPolys[i].length}-point polygon came back with ${cmd.points.length}`);
+    });
+    return `${stressPolys.length} polygons, ${nap.length} bytes`;
   });
 
-  check("the quads behind the triangles never cross themselves", () => {
+  check("nothing decodes folded over itself", () => {
+    // The one thing the split is for: a quad the encoder rounds into a bowtie
+    // fills differently under the canvas's nonzero rule than under the even-odd
+    // rule ofPath uses on the Pi. Strokes drawn where quads are most fragile.
+    let polygons = 0;
+    let folded = 0;
+    let split = 0;
+
+    for (const stroke of stressStrokes()) {
+      const built = stroke.toBrushPolygons(projectPoint, axis);
+      if (built.length === 0) continue;
+      split += built.filter((p) => p.length === 3).length;
+
+      for (const cmd of decodePolys(encodePolys(built.map((points) => ({ color: COLOR, points })), { encoder }), { encoder })) {
+        polygons++;
+        if (selfIntersections(cmd.points) > 0) folded++;
+      }
+    }
+    assert(folded === 0, `${folded} of ${polygons} decoded polygons came back folded`);
+    return `${polygons} polygons from 240 awkward strokes, ${((100 * split) / polygons).toFixed(1)}% split`;
+  });
+
+  check("the quads themselves never cross as built", () => {
     // A triangle is convex whatever you do to it, so checking the split output
     // proves nothing; the quad builder is where the guarantee has to hold.
     let crossings = 0;
@@ -339,7 +364,7 @@ function contactSheet(tiles) {
 
 function sheets(names, { out, encoder }) {
   const camera = makeCamera();
-  const shown = CANDIDATES.filter(([label]) => /legacy outline \.002|SHIPPED triangles/.test(label));
+  const shown = CANDIDATES.filter(([label]) => /legacy outline \.002|SHIPPED hybrid/.test(label));
   fs.mkdirSync(out, { recursive: true });
 
   for (const [name, stroke] of selectStrokes(names)) {
@@ -383,7 +408,7 @@ function drawnStrokes(count) {
   });
 }
 
-function draw({ out, encoder, limit, strokes: strokeCount }) {
+function draw({ out, encoder, limit, strokes: strokeCount, tolerance }) {
   const camera = makeCamera();
   const worldOrigin = new THREE.Group();
   const frame = new Frame(worldOrigin);
@@ -408,18 +433,19 @@ function draw({ out, encoder, limit, strokes: strokeCount }) {
       if (!stroke.points || stroke.points.length < 2) continue;
       const hex = stroke.color;
       const color = [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff];
-      for (const points of stroke.toBrushTriangles(projectPoint, axis, epsilon)) polys.push({ color, points });
+      for (const points of stroke.toBrushPolygons(projectPoint, axis, epsilon)) polys.push({ color, points });
     }
     return polys;
   };
 
-  let epsilon = BRUSH_SIMPLIFY;
+  let epsilon = tolerance;
   let polys = buildInput(epsilon);
   let napRaw = encodePolys(polys, { encoder });
   console.log(`pass 1  tolerance ${epsilon.toFixed(4)}  ${polys.length} polygons  ${napRaw.length} bytes`);
 
   for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && napRaw.length > limit; pass++) {
-    epsilon *= 2;
+    epsilon = Math.max(epsilon * 2, MIN_STEP); // doubling alone can't leave zero
+
     const simpler = buildInput(epsilon);
     if (simpler.length === 0) break;
     polys = simpler;
@@ -432,10 +458,11 @@ function draw({ out, encoder, limit, strokes: strokeCount }) {
     (n, cmd) => n + cmd.points.filter((p) => p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1).length,
     0
   );
-  const wrongLength = decoded.filter((cmd) => cmd.points.length !== 3).length;
+  const wrongLength = decoded.filter((cmd) => cmd.points.length !== 3 && cmd.points.length !== 4).length;
 
   console.log(`\n${frame.strokes.length} strokes -> ${polys.length} polygons, ${napRaw.length} bytes`);
-  console.log(`decoded ${decoded.length} polygons; not three points: ${wrongLength}, outside the frame: ${offFrame}`);
+  const split = polys.filter((p) => p.points.length === 3).length;
+  console.log(`decoded ${decoded.length} polygons (${split} split for safety); malformed: ${wrongLength}, outside the frame: ${offFrame}`);
   console.log(`within the ${limit}-byte limit: ${napRaw.length <= limit ? "yes" : "NO — too much to mint"}`);
 
   fs.mkdirSync(out, { recursive: true });
@@ -453,6 +480,7 @@ function main() {
       encoder: { type: "string", short: "e", default: "file" },
       out: { type: "string", short: "o", default: DEFAULT_OUT },
       limit: { type: "string", short: "l", default: "30000" },
+      tolerance: { type: "string", short: "t" },
       strokes: { type: "string", short: "s", default: "4" },
       help: { type: "boolean", short: "h", default: false }
     }
@@ -479,7 +507,13 @@ function main() {
     process.exit(2);
   }
 
-  const options = { encoder: values.encoder, out: values.out, limit, strokes };
+  const tolerance = values.tolerance === undefined ? BRUSH_SIMPLIFY : Number(values.tolerance);
+  if (!Number.isFinite(tolerance) || tolerance < 0) {
+    console.error(`Invalid --tolerance: ${values.tolerance}`);
+    process.exit(2);
+  }
+
+  const options = { encoder: values.encoder, out: values.out, limit, strokes, tolerance };
   try {
     switch (command) {
       case "compare":

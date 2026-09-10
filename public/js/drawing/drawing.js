@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Controller } from './controller.js';
 import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
-import { Frame, BRUSH_SIMPLIFY } from './tools.js';
+import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
 import { Palette } from './palette.js';
 
 let gestureRecognizer;
@@ -1250,7 +1250,7 @@ function convertToNAPLPS() {
         .applyMatrix3(toStrokeSpace)
         .normalize();
 
-    // Every stroke's triangles at one simplification tolerance. Fresh Vector2s
+    // Every stroke's polygons at one simplification tolerance. Fresh Vector2s
     // each time: NapEncoder flips a point's y in place as it encodes, so a
     // second pass over the same objects would come out upside down.
     const buildInput = (epsilon) => {
@@ -1266,9 +1266,10 @@ function convertToNAPLPS() {
             const b = hex & 0xff;
             const color = new window.Vector3(r, g, b);
 
-            // The stroke as a soup of filled triangles: see toBrushTriangles()
-            for (const triangle of stroke.toBrushTriangles(project, widthAxis, epsilon)) {
-                const points2D = triangle.map(p => new window.Vector2(p.x, p.y));
+            // Quads along the stroke, triangles where a quad would be fragile:
+            // see toBrushPolygons()
+            for (const polygon of stroke.toBrushPolygons(project, widthAxis, epsilon)) {
+                const points2D = polygon.map(p => new window.Vector2(p.x, p.y));
                 input.push(new window.NapInputWrapper(color, points2D, true));
             }
         }
@@ -1290,7 +1291,11 @@ function convertToNAPLPS() {
     let encoder = new window.NapEncoder(input);
 
     for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && encoder.napRaw.length > maxNaplpsBytes; pass++) {
-        epsilon *= 2;
+        // Doubling alone can't leave zero, and zero is a brush tuned to keep
+        // every point it was given. Step onto the encoder's own quantum first:
+        // the coarsest tolerance that still discards nothing the format could
+        // have carried anyway.
+        epsilon = Math.max(epsilon * 2, MIN_STEP);
         console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${maxNaplpsBytes} limit; ` +
                     `simplifying at ${epsilon.toFixed(4)}`);
 
@@ -1315,8 +1320,9 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
-    console.log(`Converted ${frame.strokes.length} strokes (${input.length} triangles) to ` +
-                `${encoder.napRaw.length} bytes of NAPLPS`);
+    const split = input.filter(polygon => polygon.points.length === 3).length;
+    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons, ` +
+                `${split} split for safety) to ${encoder.napRaw.length} bytes of NAPLPS`);
     return encoder.napRaw;
 }
 

@@ -15,8 +15,13 @@ const TIP_RADIUS = 0.01;
 // The next three are in frame widths -- the 0..1 space toBrushQuads works in,
 // where 1 is the whole drawing, so 0.005 is about three pixels of a 640-wide one.
 export const BRUSH_SIMPLIFY = 0.002; //0.005; // how far simplification may move a point
-const MIN_STEP = 0.0005;      // 1/2048: a shorter step is a rounding error to the encoder
+export const MIN_STEP = 0.0005; // 1/2048: a shorter step is a rounding error to the encoder
 const MIN_RADIUS = 0.0005;    // keeps a quad from collapsing into a line
+
+// How much room a quad needs before the encoder's rounding could fold it. Four
+// quanta is twice the worst fold measured over a stress corpus of strokes drawn
+// tiny, distant, and doubled back on themselves.
+const QUAD_SAFE_HEIGHT = 4 * MIN_STEP;
 
 // How far inside the frame a clamped point is held. Each delta the encoder
 // writes can fall a quantum short of where it was asked for, and a quad is four
@@ -115,6 +120,49 @@ function cornerReach(points, radii) {
     }
 
     return reach;
+}
+
+/**
+ * The shortest distance from any vertex of a polygon to the line through its two
+ * neighbours -- how much room the encoder's rounding has to fold the shape over
+ * itself. A healthy quad measures about a brush width here; one pinched to a
+ * sliver, or flattened against the frame by clamping, measures nearly nothing.
+ * @param {{x: number, y: number}[]} poly
+ * @returns {number} In frame widths
+ */
+function cornerHeight(poly) {
+    let min = Infinity;
+
+    for (let i = 0; i < poly.length; i++) {
+        const point = poly[i];
+        const before = poly[(i + poly.length - 1) % poly.length];
+        const after = poly[(i + 1) % poly.length];
+
+        const span = Math.hypot(after.x - before.x, after.y - before.y);
+        if (span < 1e-12) return 0; // the neighbours are the same point: no shape left
+
+        const twiceArea = Math.abs((after.x - before.x) * (before.y - point.y) -
+                                   (before.x - point.x) * (after.y - before.y));
+        min = Math.min(min, twiceArea / span);
+    }
+
+    return min;
+}
+
+/**
+ * Cuts a quad in two along its shorter diagonal, so neither half comes out
+ * thinner than it has to be.
+ * @param {{x: number, y: number}[]} quad
+ * @returns {{x: number, y: number}[][]} Two triangles
+ */
+function splitQuad(quad) {
+    const [a, b, c, d] = quad;
+    const acrossAC = Math.hypot(c.x - a.x, c.y - a.y);
+    const acrossBD = Math.hypot(d.x - b.x, d.y - b.y);
+
+    return acrossAC <= acrossBD
+        ? [[a, b, c], [a, c, d]]
+        : [[b, c, d], [b, d, a]];
 }
 
 /**
@@ -498,7 +546,7 @@ export class Stroke {
      * fills differently on every renderer. Consecutive quads reach a little way
      * into each other -- see cornerReach() -- so no gap shows at a turn.
      *
-     * This is the shape; toBrushTriangles() is what gets encoded.
+     * This is the shape; toBrushPolygons() is what gets encoded.
      *
      * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
      * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
@@ -564,33 +612,40 @@ export class Stroke {
     }
 
     /**
-     * The same run, cut into triangles -- one filled polygon each. This is what
-     * convertToNAPLPS() encodes.
+     * The stroke as the filled polygons that get encoded: the quads above, and
+     * two triangles in place of any quad thin enough that the encoder could fold
+     * it over itself.
      *
-     * A triangle cannot be anything but convex, so no renderer has an opinion
-     * about what to fill in it, where a quad has to be built carefully to earn
-     * that. Three points also hold the encoder's running delta cursor to the
-     * shortest run the format allows, since every point in a polygon after the
-     * first is a delta from the one before it.
+     * The distinction earns its keep because the two renderers disagree about a
+     * folded quad, and only about that. A bowtie fills its crossing region under
+     * the nonzero rule a browser canvas uses, and leaves it hollow under the
+     * even-odd rule `ofPath` uses on the Pi, so a quad that quantises into one
+     * comes out differently in the two places a drawing is meant to look alike.
+     * A triangle has no such failure mode -- three points cannot cross -- and it
+     * also holds the encoder's running delta cursor to the shortest run the
+     * format allows.
      *
-     * It costs about half again as many bytes as the quads it comes from, which
-     * is why convertToNAPLPS() watches the total and gives simplification
-     * tolerance back when a drawing won't fit the chain.
+     * Splitting everything would cost half again as many bytes; splitting only
+     * what cornerHeight() puts at risk costs a couple of percent, and it is that
+     * couple of percent that would otherwise account for every disagreement.
      *
      * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
      * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
      * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
-     * @returns {{x: number, y: number}[][]} Closed 3-point polygons, in drawing order
+     * @returns {{x: number, y: number}[][]} Closed polygons of three or four points, in drawing order
      */
-    toBrushTriangles(project, widthAxis, epsilon = BRUSH_SIMPLIFY) {
-        const triangles = [];
+    toBrushPolygons(project, widthAxis, epsilon = BRUSH_SIMPLIFY) {
+        const polygons = [];
 
         for (const quad of this.toBrushQuads(project, widthAxis, epsilon)) {
-            const [a, b, c, d] = quad;
-            triangles.push([a, b, c], [a, c, d]);
+            if (cornerHeight(quad) >= QUAD_SAFE_HEIGHT) {
+                polygons.push(quad);
+            } else {
+                polygons.push(...splitQuad(quad));
+            }
         }
 
-        return triangles;
+        return polygons;
     }
 }
 

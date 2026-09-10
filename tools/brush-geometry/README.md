@@ -25,6 +25,7 @@ node tools/brush-geometry/brush-geometry.mjs draw
 | `-e, --encoder <mode>` | `file` (default), `round`, or `truncate` |
 | `-o, --out <dir>` | where `sheets` and `draw` write (default: `tools/brush-geometry/out`) |
 | `-l, --limit <bytes>` | `draw`: the mint limit to fit under (default: 30000) |
+| `-t, --tolerance <n>` | `draw`: where the ladder starts; `0` is the brush that keeps every point |
 | `-s, --strokes <n>` | `draw`: how many strokes to draw (default: 4) |
 | `-h, --help` | usage, including what each column means |
 
@@ -76,7 +77,10 @@ pass 3  tolerance 0.0080  35 polygons   633 bytes
 ```
 
 `--strokes` says how busy the drawing is; at the real 30 KB limit it takes
-around a hundred strokes before the first pass overshoots.
+around a hundred strokes before the first pass overshoots. `--tolerance 0` is
+the case worth keeping an eye on: a brush that keeps every point starts the
+ladder at zero, and the rungs have to step onto the encoder's quantum to move at
+all.
 
 ## The encoder switch
 
@@ -97,8 +101,9 @@ the format draws in, plus a line in `CANDIDATES` at the foot of that file.
 `compare` picks the table up from that list. The candidates already there are
 the ones that have been weighed against what ships — one long outline of the
 whole stroke (in 3D, as the code used to, and in 2D), the ribbon cut into
-overlapping chunks, per-segment quads cornered with a mitre, and the polygon
-soup: the same quads split into triangles, one filled polygon each.
+overlapping chunks, per-segment quads cornered with a mitre, and the two ends of
+the split that `toBrushPolygons()` decides one quad at a time: `every quad split`
+and `no quad split`.
 
 ## Known gaps
 

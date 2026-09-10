@@ -83,6 +83,42 @@ export function buildStroke(points) {
 }
 
 /**
+ * Strokes drawn where a quad is most fragile: tiny, far from the camera, or
+ * doubled back on itself. Deterministic, so a failure can be reproduced.
+ * @param {number} count
+ * @returns {Stroke[]}
+ */
+export function stressStrokes(count = 240) {
+  let seed = 12345;
+  const random = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const out = [];
+
+  for (let trial = 0; trial < count; trial++) {
+    const kind = ["tiny", "distant", "hairpin", "ordinary"][trial % 4];
+    const points = [];
+    const n = kind === "tiny" ? 6 + Math.floor(random() * 6) : 30 + Math.floor(random() * 60);
+    const scale = kind === "tiny" ? 0.02 + random() * 0.15 : 0.5 + random() * 3;
+    const depth = kind === "distant" ? -20 - random() * 60 : -2 + random() * 4;
+    const cx = (random() - 0.5) * 4;
+    const cy = (random() - 0.5) * 3;
+    const turn = kind === "hairpin" ? Math.PI * (0.9 + random() * 0.1) : random() * Math.PI;
+
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      const angle = t * turn * 2;
+      points.push(new THREE.Vector3(
+        cx + Math.cos(angle) * scale * (1 - 0.3 * t),
+        cy + Math.sin(angle) * scale * (1 - 0.3 * t),
+        depth + Math.sin(t * 4) * 0.4
+      ));
+    }
+    out.push(buildStroke(points));
+  }
+
+  return out;
+}
+
+/**
  * @param {string[]} names - Empty for all of them
  * @returns {[string, Stroke][]}
  */
