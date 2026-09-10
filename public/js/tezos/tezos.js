@@ -63,10 +63,8 @@ async function initTezos() {
         NapClient.onNaplps(function(message) {
             loadTelidonFromText(message.naplps);
             if (message.source === "chain") {
-                noteTokenShown(message.id); // a new mint becomes the arrow keys' right-hand end
-                const link = message.link || (_config.explorerBase + "/" + _config.contract + "/operations/");
-                setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
-                          'Token #' + message.id + "</a> loaded from chain");
+                noteTokenShown(message.id, message.link); // a new mint becomes the arrow keys' right-hand end
+                setStatus(tokenLink("Token #" + message.id, message.link) + " loaded from chain");
             } else {
                 setStatus("Drawing received (" + (message.source || "server") + ")");
             }
@@ -259,10 +257,24 @@ let _currentTokenId = null;
 let _latestTokenId  = null;
 let _tokenLoading   = false;   // one read at a time, so a held arrow key can't queue them
 
-function noteTokenShown(id) {
+let _tokenLink = null;
+
+function noteTokenShown(id, link) {
     if (typeof id !== "number" || isNaN(id)) return;
     _currentTokenId = id;
     if (_latestTokenId === null || id > _latestTokenId) _latestTokenId = id;
+    if (link) _tokenLink = link;
+}
+
+// Wraps a status line's subject in the explorer link. Every token points at the
+// same page -- the contract's operations -- so the last link seen serves for the
+// ends of the chain, where there is no token in hand, and the config's copy
+// covers a page that has yet to load one.
+function tokenLink(text, link) {
+    const href = link || _tokenLink ||
+                 (_config ? _config.explorerBase + "/" + _config.contract + "/operations/" : "#");
+    return '<a href="' + href + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
+           text + "</a>";
 }
 
 async function loadLatestToken(toRpi) {
@@ -272,11 +284,9 @@ async function loadLatestToken(toRpi) {
         console.log("[nap-xtz] loaded from chain, NAPLPS length:", token.naplps.length);
         loadTelidonFromText(token.naplps);
         if (toRpi) NapClient.sendToRpi(token.naplps, "latest");
-        noteTokenShown(token.id);
+        noteTokenShown(token.id, token.link);
 
-        const link = token.link || "#";
-        setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
-                  "Latest token</a> loaded from chain");
+        setStatus(tokenLink("Latest token", token.link) + " loaded from chain");
     } catch (e) {
         console.warn("[nap-xtz] loadLatestToken error:", e);
         setStatus("Chain read failed — using local samples");
@@ -295,11 +305,9 @@ async function loadToken(id) {
         console.log("[nap-xtz] loaded token #" + id + ", NAPLPS length:", token.naplps.length);
         loadTelidonFromText(token.naplps);
         NapClient.sendToRpi(token.naplps, "browse");
-        noteTokenShown(token.id);
+        noteTokenShown(token.id, token.link);
 
-        const link = token.link || "#";
-        setStatus('<a href="' + link + '" target="_blank" style="color: inherit; text-decoration: underline;">' +
-                  "Token #" + token.id + "</a> loaded from chain");
+        setStatus(tokenLink("Token #" + token.id, token.link) + " loaded from chain");
     } catch (e) {
         console.warn("[nap-xtz] loadToken " + id + ":", e);
         if (e.status === 404) {
@@ -326,11 +334,11 @@ function stepToken(delta) {
 
     const id = _currentTokenId + delta;
     if (id < 0) {
-        setStatus("Token #0 is the earliest on chain");
+        setStatus(tokenLink("Token #0") + " is the earliest on chain");
         return;
     }
     if (_latestTokenId !== null && id > _latestTokenId) {
-        setStatus("Token #" + _latestTokenId + " is the newest on chain");
+        setStatus(tokenLink("Token #" + _latestTokenId) + " is the newest on chain");
         return;
     }
 
