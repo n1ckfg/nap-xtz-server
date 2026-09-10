@@ -274,7 +274,15 @@
 			// ── Slideshow mode ──
 
 			function startSlideshow() {
-			    if (liveDrawingActive || slideshowActive) return;
+			    if (liveDrawingActive) return;
+			    // Nothing here is meant to be operated, so the slideshow starts the
+			    // way drawing mode does: chrome out of the way, as though "h" had put
+			    // it there. A mouse move brings it back, review mode's rule as ever --
+			    // and clicking the link again, with the slideshow already running, is
+			    // the way back to a clean screen, so this comes before the guard below.
+			    setUIHidden(true);
+			    if (slideshowActive) return;
+
 			    slideshowActive = true;
 			    const link = document.getElementById("slideshow");
 			    if (link) link.classList.add("active");
@@ -641,7 +649,7 @@
 	<body class="ui-hidden">
 		<div id="container">
 			<div class="sketch">
-				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz-server"><i>source</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
+				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz-server"><i>repo</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
 				<a href="javascript:void(0)" id="prev-token"><i>&lt;&lt;</i></a>&nbsp;
 				<a href="javascript:void(0)" id="latest"><i>latest</i></a>&nbsp;
 				<a href="javascript:void(0)" id="next-token"><i>&gt;&gt;</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;

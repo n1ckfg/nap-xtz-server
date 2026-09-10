@@ -324,3 +324,7 @@ body.ui-hidden #drawing-container #loading,
 body.ui-hidden #labels-container {
 	display: none !important;
 }
+
+body.ui-hidden {
+	cursor: none;
+}
