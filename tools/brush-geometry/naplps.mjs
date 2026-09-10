@@ -25,17 +25,19 @@ export const NAPLPS_JS = path.resolve(here, "../../public/js/telidon/naplps.js")
 // Both forms of the quantisation live in naplps.js, one of them commented out;
 // which one is live has changed over the file's history, so match on the live
 // pair (a commented line can't start with `const`) rather than on fixed text.
+// The clamp around them is not optional -- without it a magnitude of exactly
+// 1.0 wraps to zero -- so both forms carry it.
+const CLAMP = "Math.min(this.maxBitVals - 1, ";
 const QUANTISERS = {
   truncate: {
-    live: /^([ \t]*)const int([XY]) = parseInt\(Math\.abs\(input\.[xy]\) \* this\.maxBitVals\);$/gm,
+    live: /^([ \t]*)const int([XY]) = Math\.min\(this\.maxBitVals - 1, parseInt\(Math\.abs\(input\.[xy]\) \* this\.maxBitVals\)\);$/gm,
     write: (indent, axis) =>
-      `${indent}const int${axis} = parseInt(Math.abs(input.${axis.toLowerCase()}) * this.maxBitVals);`
+      `${indent}const int${axis} = ${CLAMP}parseInt(Math.abs(input.${axis.toLowerCase()}) * this.maxBitVals));`
   },
   round: {
     live: /^([ \t]*)const int([XY]) = Math\.min\(this\.maxBitVals - 1, Math\.round\(Math\.abs\(input\.[xy]\) \* this\.maxBitVals\)\);$/gm,
     write: (indent, axis) =>
-      `${indent}const int${axis} = Math.min(this.maxBitVals - 1, ` +
-      `Math.round(Math.abs(input.${axis.toLowerCase()}) * this.maxBitVals));`
+      `${indent}const int${axis} = ${CLAMP}Math.round(Math.abs(input.${axis.toLowerCase()}) * this.maxBitVals));`
   }
 };
 

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Controller } from './controller.js';
 import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
-import { Frame } from './tools.js';
+import { Frame, BRUSH_SIMPLIFY } from './tools.js';
 import { Palette } from './palette.js';
 
 let gestureRecognizer;
@@ -30,6 +30,16 @@ const _drawPos = new THREE.Vector3();
 // The drawing view renders at 4:3 to match the main p5 canvas (640x480),
 // centered and letterboxed within the fullscreen container.
 const DRAW_ASPECT = 640 / 480;
+
+// A minted drawing has to fit the chain: app.js refuses one over its own
+// TEZOS_MAX_BYTES, which GET /api/config reports. The default here is that
+// route's default, and startDrawingMode() replaces it with the real figure.
+const DEFAULT_MAX_NAPLPS_BYTES = 30000;
+let maxNaplpsBytes = DEFAULT_MAX_NAPLPS_BYTES;
+
+// How many times convertToNAPLPS() may coarsen the brush to get under it.
+// Five doublings takes the tolerance from a couple of pixels to about twenty.
+const MAX_SIMPLIFY_PASSES = 5;
 
 // Largest 4:3 box that fits the window ("contain"), plus its centering offset.
 function getDrawSize() {
@@ -1071,6 +1081,17 @@ export async function startDrawingMode(container) {
     // Store reference to container for cleanup
     window._drawingContainer = container;
 
+    // Ask the backend what a token may weigh, without holding drawing mode up
+    // for it: NapClient caches the reply, and nothing is encoded until a stroke
+    // has been drawn. If the call fails the default above stands.
+    if (window.NapClient && typeof window.NapClient.getConfig === 'function') {
+        window.NapClient.getConfig()
+            .then(config => {
+                if (config && config.maxNaplpsBytes > 0) maxNaplpsBytes = config.maxNaplpsBytes;
+            })
+            .catch(err => console.warn('[nap-xtz] using the default size limit:', err.message));
+    }
+
     // Show loading indicator
     const loadingEl = container.querySelector('#loading') || document.getElementById('loading');
     if (loadingEl) {
@@ -1197,8 +1218,6 @@ function convertToNAPLPS() {
         return null;
     }
 
-    const input = [];
-
     frame.updateWorldMatrix(true, false); // the loop may already be stopped
 
     // Strokes are kept in the frame's own space, and the frame rides on the node
@@ -1231,30 +1250,63 @@ function convertToNAPLPS() {
         .applyMatrix3(toStrokeSpace)
         .normalize();
 
-    for (const stroke of frame.strokes) {
-        if (!stroke.points || stroke.points.length < 2) continue;
+    // Every stroke's polygons at one simplification tolerance. Fresh Vector2s
+    // each time: NapEncoder flips a point's y in place as it encodes, so a
+    // second pass over the same objects would come out upside down.
+    const buildInput = (epsilon) => {
+        const input = [];
 
-        // Convert hex color to RGB Vector3 (0-255)
-        const hex = stroke.color || 0xffffff;
-        const r = (hex >> 16) & 0xff;
-        const g = (hex >> 8) & 0xff;
-        const b = hex & 0xff;
-        const color = new window.Vector3(r, g, b);
+        for (const stroke of frame.strokes) {
+            if (!stroke.points || stroke.points.length < 2) continue;
 
-        // One short filled polygon per segment of the stroke: see toBrushQuads()
-        for (const quad of stroke.toBrushQuads(project, widthAxis)) {
-            const points2D = quad.map(p => new window.Vector2(p.x, p.y));
-            input.push(new window.NapInputWrapper(color, points2D, true));
+            // Convert hex color to RGB Vector3 (0-255)
+            const hex = stroke.color || 0xffffff;
+            const r = (hex >> 16) & 0xff;
+            const g = (hex >> 8) & 0xff;
+            const b = hex & 0xff;
+            const color = new window.Vector3(r, g, b);
+
+            // One short filled polygon per segment of the stroke: see toBrushQuads()
+            for (const quad of stroke.toBrushQuads(project, widthAxis, epsilon)) {
+                const points2D = quad.map(p => new window.Vector2(p.x, p.y));
+                input.push(new window.NapInputWrapper(color, points2D, true));
+            }
         }
-    }
+        return input;
+    };
+
+    // A drawing that won't fit the chain is redrawn with a coarser brush rather
+    // than handed over to be refused: the shape survives losing points far
+    // better than the drawing survives a mint that never happens. Detail is
+    // only given up when it has to be -- the first pass is the brush as tuned.
+    let epsilon = BRUSH_SIMPLIFY;
+    let input = buildInput(epsilon);
 
     if (input.length === 0) {
         console.log('No valid strokes to encode');
         return null;
     }
 
-    // Encode to NAPLPS
-    const encoder = new window.NapEncoder(input);
+    let encoder = new window.NapEncoder(input);
+
+    for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && encoder.napRaw.length > maxNaplpsBytes; pass++) {
+        epsilon *= 2;
+        console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${maxNaplpsBytes} limit; ` +
+                    `simplifying at ${epsilon.toFixed(4)}`);
+
+        const simpler = buildInput(epsilon);
+        if (simpler.length === 0) break; // nothing left to give: keep what we have
+
+        input = simpler;
+        encoder = new window.NapEncoder(input);
+    }
+
+    if (encoder.napRaw.length > maxNaplpsBytes) {
+        // Encoded anyway: the canvas and the Raspberry Pi will take it even
+        // though a mint won't, and the wallet says so in its own words.
+        console.warn(`[nap-xtz] drawing is ${encoder.napRaw.length} bytes, still over the ` +
+                     `${maxNaplpsBytes} limit -- too much to mint`);
+    }
 
     // Load into the main canvas
     if (typeof window.loadTelidonFromText === 'function') {
@@ -1263,7 +1315,8 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
-    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons) to NAPLPS`);
+    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons) to ` +
+                `${encoder.napRaw.length} bytes of NAPLPS`);
     return encoder.napRaw;
 }
 

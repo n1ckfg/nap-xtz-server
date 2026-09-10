@@ -14,9 +14,15 @@ const TIP_RADIUS = 0.01;
 
 // The next three are in frame widths -- the 0..1 space toBrushQuads works in,
 // where 1 is the whole drawing, so 0.005 is about three pixels of a 640-wide one.
-const BRUSH_SIMPLIFY = 0.002; //0.005; // how far simplification may move a point
+export const BRUSH_SIMPLIFY = 0.002; //0.005; // how far simplification may move a point
 const MIN_STEP = 0.0005;      // 1/2048: a shorter step is a rounding error to the encoder
 const MIN_RADIUS = 0.0005;    // keeps a quad from collapsing into a line
+
+// How far inside the frame a clamped point is held. Each delta the encoder
+// writes can fall a quantum short of where it was asked for, and a quad is four
+// of them, so a point pinned to the very edge can decode just outside it -- and
+// both renderers drop a point that lands outside rather than pulling it back.
+const FRAME_MARGIN = 4 * MIN_STEP;
 
 /**
  * Ramer-Douglas-Peucker, over indices rather than points so that anything held
@@ -125,12 +131,13 @@ function touchesFrame(poly) {
 
 /**
  * @param {{x: number, y: number}} p
- * @returns {{x: number, y: number}} The point pulled inside the 0..1 frame
+ * @returns {{x: number, y: number}} The point pulled inside the frame, and far
+ *     enough inside to still be there once it has been through the encoder
  */
 function clampToFrame(p) {
     return {
-        x: Math.max(0, Math.min(1, p.x)),
-        y: Math.max(0, Math.min(1, p.y))
+        x: Math.max(FRAME_MARGIN, Math.min(1 - FRAME_MARGIN, p.x)),
+        y: Math.max(FRAME_MARGIN, Math.min(1 - FRAME_MARGIN, p.y))
     };
 }
 

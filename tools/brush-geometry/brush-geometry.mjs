@@ -23,7 +23,7 @@ import { encodePNG } from "../thumbnail-maker/png.mjs";
 import { encodePolys, decodePolys, encoderInFile, maskOf, score, ART } from "./naplps.mjs";
 import { CANDIDATES, Stroke, brushReference, makeCamera, project, shipped, widthAxisFor } from "./candidates.mjs";
 import { STROKES, buildStroke, selectStrokes } from "./strokes.mjs";
-import { Frame } from "../../public/js/drawing/tools.js";
+import { Frame, BRUSH_SIMPLIFY } from "../../public/js/drawing/tools.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_OUT = path.join(here, "out");
@@ -35,7 +35,8 @@ Commands:
   compare [stroke ...]   score every candidate geometry against the ideal brush
   checks                 assert the shipped toBrushQuads holds up at the edges
   sheets [stroke ...]    write side-by-side PNGs: ideal, legacy outline, shipped
-  draw                   draw four strokes through a real Frame, end to end
+  draw                   draw strokes through a real Frame, end to end, with
+                         the byte budget ladder convertToNAPLPS() runs
 
 Strokes: ${Object.keys(STROKES).join(", ")} (default: all)
 
@@ -43,6 +44,8 @@ Options:
   -e, --encoder <mode>   file (default), round, or truncate — rewrites
                          makeNapVector2's quantisation while measuring
   -o, --out <dir>        where sheets and draw write (default: tools/brush-geometry/out)
+  -l, --limit <bytes>    draw: the mint limit to fit under (default: 30000)
+  -s, --strokes <n>      draw: how many strokes to draw (default: 4)
   -h, --help             show this message
 
 What the columns mean:
@@ -193,17 +196,44 @@ function checks({ encoder }) {
     assert(quads.length === 0, `expected nothing, got ${quads.length} quads`);
   });
 
-  check("half off screen: every point inside the frame", () => {
-    const points = [];
-    for (let i = 0; i < 40; i++) points.push([-2 + (12 * i) / 39, 0.5, 0]);
-    const quads = quadsOf(points);
-    assert(quads.length > 0, "expected quads");
-    for (const quad of quads) {
-      for (const p of quad) {
-        assert(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1, `point outside the frame: ${p.x}, ${p.y}`);
+  check("half off screen: every point inside the frame, encoded and decoded", () => {
+    // Strokes leaving the frame in every direction: a point pinned to the edge
+    // has to still be inside it after the round trip, or the renderer drops it.
+    let quadCount = 0;
+    let decodedPoints = 0;
+
+    for (let trial = 0; trial < 16; trial++) {
+      const angle = (trial / 16) * Math.PI * 2;
+      const points = [];
+      for (let i = 0; i < 60; i++) {
+        const t = i / 59;
+        points.push([
+          Math.cos(angle) * (-6 + 14 * t) + Math.sin(t * 9) * 0.6,
+          Math.sin(angle) * (-6 + 14 * t) + Math.cos(t * 7) * 0.6,
+          0
+        ]);
+      }
+      const stroke = rawStroke(points);
+      stroke.refine();
+      const quads = stroke.toBrushQuads(projectPoint, axis);
+      if (quads.length === 0) continue;
+      quadCount += quads.length;
+
+      for (const quad of quads) {
+        for (const p of quad) {
+          assert(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1, `encoded point outside the frame: ${p.x}, ${p.y}`);
+        }
+      }
+
+      const nap = encodePolys(quads.map((points2D) => ({ color: COLOR, points: points2D })), { encoder });
+      for (const cmd of decodePolys(nap, { encoder })) {
+        for (const p of cmd.points) {
+          decodedPoints++;
+          assert(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1, `decoded point outside the frame: ${p.x}, ${p.y}`);
+        }
       }
     }
-    return `${quads.length} quad(s), all clamped`;
+    return `${quadCount} quads over 16 directions, ${decodedPoints} points all inside`;
   });
 
   check("the encoder drops nothing", () => {
@@ -323,21 +353,40 @@ function sheets(names, { out, encoder }) {
 }
 
 /* ── draw ──────────────────────────────────────────────────────────────── */
-// Four strokes fed through the real Frame API — trimming, refine, the per-stroke
-// z-offset — then exported the way drawing.js's convertToNAPLPS() does it.
-function draw({ out, encoder }) {
+// Strokes fed through the real Frame API — trimming, refine, the per-stroke
+// z-offset — then exported the way drawing.js's convertToNAPLPS() does it,
+// budget ladder included. `--limit` is what that function reads from
+// GET /api/config; lowering it is how the ladder gets exercised on a drawing
+// small enough to look at.
+const MAX_SIMPLIFY_PASSES = 5; // convertToNAPLPS() allows itself this many
+
+function drawnStrokes(count) {
+  const palette = [0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff];
+  const shapes = [
+    (t) => [-3 + 6 * t, 2 + Math.sin(t * 7) * 0.4, 0],
+    (t) => [Math.cos(t * 6) * 2, Math.sin(t * 6) * 1.5, Math.sin(t * 3) * 1.5],
+    (t) => [-2.5 + 5 * t, -2 + Math.sin(t * 20) * 0.8, 0],
+    (t) => [1.5 + t * 0.2, 1 - 3 * t, -2 + 4 * t]
+  ];
+  // Past the four, strokes are the same shapes shifted along, so a big drawing
+  // is a plausible one rather than four strokes drawn on top of each other.
+  return Array.from({ length: count }, (_, i) => {
+    const shape = shapes[i % shapes.length];
+    const lane = Math.floor(i / shapes.length); // the first four sit where they were drawn
+    const shift = lane === 0 ? 0 : ((lane % 7) - 3) * 0.5;
+    return { color: palette[i % palette.length], at: (t) => {
+      const [x, y, z] = shape(t);
+      return [x + shift, y - shift * 0.4, z];
+    } };
+  });
+}
+
+function draw({ out, encoder, limit, strokes: strokeCount }) {
   const camera = makeCamera();
   const worldOrigin = new THREE.Group();
   const frame = new Frame(worldOrigin);
 
-  const drawn = [
-    { color: 0xff0000, at: (t) => [-3 + 6 * t, 2 + Math.sin(t * 7) * 0.4, 0] },
-    { color: 0x00ff00, at: (t) => [Math.cos(t * 6) * 2, Math.sin(t * 6) * 1.5, Math.sin(t * 3) * 1.5] },
-    { color: 0x0000ff, at: (t) => [-2.5 + 5 * t, -2 + Math.sin(t * 20) * 0.8, 0] },
-    { color: 0xffff00, at: (t) => [1.5 + t * 0.2, 1 - 3 * t, -2 + 4 * t] }
-  ];
-
-  drawn.forEach((stroke, id) => {
+  drawnStrokes(strokeCount).forEach((stroke, id) => {
     const samples = 90;
     for (let i = 0; i < samples; i++) {
       const point = new THREE.Vector3(...stroke.at(i / (samples - 1)));
@@ -351,14 +400,31 @@ function draw({ out, encoder }) {
   const projectPoint = (p) => project(frame.localToWorld(p.clone()), camera);
   const axis = widthAxisFor(camera, frame);
 
-  const polys = [];
-  for (const stroke of frame.strokes) {
-    const hex = stroke.color;
-    const color = [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff];
-    for (const points of stroke.toBrushQuads(projectPoint, axis)) polys.push({ color, points });
+  const buildInput = (epsilon) => {
+    const polys = [];
+    for (const stroke of frame.strokes) {
+      if (!stroke.points || stroke.points.length < 2) continue;
+      const hex = stroke.color;
+      const color = [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff];
+      for (const points of stroke.toBrushQuads(projectPoint, axis, epsilon)) polys.push({ color, points });
+    }
+    return polys;
+  };
+
+  let epsilon = BRUSH_SIMPLIFY;
+  let polys = buildInput(epsilon);
+  let napRaw = encodePolys(polys, { encoder });
+  console.log(`pass 1  tolerance ${epsilon.toFixed(4)}  ${polys.length} polygons  ${napRaw.length} bytes`);
+
+  for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && napRaw.length > limit; pass++) {
+    epsilon *= 2;
+    const simpler = buildInput(epsilon);
+    if (simpler.length === 0) break;
+    polys = simpler;
+    napRaw = encodePolys(polys, { encoder });
+    console.log(`pass ${pass + 1}  tolerance ${epsilon.toFixed(4)}  ${polys.length} polygons  ${napRaw.length} bytes`);
   }
 
-  const napRaw = encodePolys(polys, { encoder });
   const decoded = decodePolys(napRaw, { encoder });
   const offFrame = decoded.reduce(
     (n, cmd) => n + cmd.points.filter((p) => p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1).length,
@@ -366,9 +432,9 @@ function draw({ out, encoder }) {
   );
   const wrongLength = decoded.filter((cmd) => cmd.points.length !== 4).length;
 
-  console.log(`${frame.strokes.length} strokes -> ${polys.length} polygons, ${napRaw.length} bytes`);
+  console.log(`\n${frame.strokes.length} strokes -> ${polys.length} polygons, ${napRaw.length} bytes`);
   console.log(`decoded ${decoded.length} polygons; not four points: ${wrongLength}, outside the frame: ${offFrame}`);
-  console.log(`within the 30 KB mint limit: ${napRaw.length <= 30000 ? "yes" : "NO"}`);
+  console.log(`within the ${limit}-byte limit: ${napRaw.length <= limit ? "yes" : "NO — too much to mint"}`);
 
   fs.mkdirSync(out, { recursive: true });
   const { width, height, pixels } = renderNap(napRaw, { width: 640 });
@@ -384,6 +450,8 @@ function main() {
     options: {
       encoder: { type: "string", short: "e", default: "file" },
       out: { type: "string", short: "o", default: DEFAULT_OUT },
+      limit: { type: "string", short: "l", default: "30000" },
+      strokes: { type: "string", short: "s", default: "4" },
       help: { type: "boolean", short: "h", default: false }
     }
   });
@@ -398,7 +466,18 @@ function main() {
     process.exit(2);
   }
 
-  const options = { encoder: values.encoder, out: values.out };
+  const limit = Number(values.limit);
+  const strokes = Number(values.strokes);
+  if (!Number.isFinite(limit) || limit < 1) {
+    console.error(`Invalid --limit: ${values.limit}`);
+    process.exit(2);
+  }
+  if (!Number.isInteger(strokes) || strokes < 1) {
+    console.error(`Invalid --strokes: ${values.strokes}`);
+    process.exit(2);
+  }
+
+  const options = { encoder: values.encoder, out: values.out, limit, strokes };
   try {
     switch (command) {
       case "compare":

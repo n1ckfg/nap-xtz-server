@@ -1486,8 +1486,12 @@ class NapEncoder {
 
 		if (this.debug) console.log("Encoding vector input " + input.x + ", " + input.y + " ...");
 
-		const intX = parseInt(Math.abs(input.x) * this.maxBitVals);
-		const intY = parseInt(Math.abs(input.y) * this.maxBitVals);
+		// A magnitude of exactly 1.0 -- a coordinate on the far edge of the frame,
+		// or a delta that crosses it -- comes to maxBitVals, one past the field.
+		// binary() keeps the low bits, so it wraps to zero and the point lands at
+		// the opposite edge; hold it at the largest value the field can carry.
+		const intX = Math.min(this.maxBitVals - 1, parseInt(Math.abs(input.x) * this.maxBitVals));
+		const intY = Math.min(this.maxBitVals - 1, parseInt(Math.abs(input.y) * this.maxBitVals));
         // ACCURACY FIX
         //const intX = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.x) * this.maxBitVals));
         //const intY = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.y) * this.maxBitVals));
@@ -1500,10 +1504,15 @@ class NapEncoder {
 		for (let i=0; i<this.dataLength; i++) {
 			let vectorByte = "01";
 
-			// first bit is the sign
+			// First bit is the sign. Zero counts as positive: a zero delta -- two
+			// points sharing an x or a y, which any axis-aligned edge has -- was
+			// being written negative, and a negative y delta decodes as
+			// (cursor + 1 - magnitude), so the point came back a whole frame away
+			// and the renderer dropped it. makeNapPoints marks the one genuinely
+			// negative value that reaches here as zero, so it still reads as one.
 			switch (i) {
 				case 0:
-					if (input.x > 0) {
+					if (input.x >= 0) {
 						vectorByte += "0";
 					} else {
 						vectorByte += "1";
@@ -1512,7 +1521,7 @@ class NapEncoder {
 					vectorByte += binX.charAt(0);
 					vectorByte += binX.charAt(1);
 
-					if (input.y > 0) {
+					if (input.y >= 0 && !Object.is(input.y, -0)) {
 						vectorByte += "0";
 					} else {
 						vectorByte += "1";
@@ -1623,7 +1632,11 @@ class NapEncoder {
 	                if (nv.x < nvLast.x) x = Math.abs(x) - 1;
 	                
 	                let y = Math.abs(nv.y) - Math.abs(nvLast.y);
-	                if (nv.y < nvLast.y) y = Math.abs(y) - 1;               
+	                if (nv.y < nvLast.y) y = Math.abs(y) - 1;
+	                // A step of exactly one frame lands on zero here, where a step
+	                // of none also sits. Negative zero keeps them apart: it carries
+	                // the same magnitude and the sign this one needs.
+	                if (nv.y < nvLast.y && y === 0) y = -0;               
 	                // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ 
 
 	                if (i === _points.length-1) {

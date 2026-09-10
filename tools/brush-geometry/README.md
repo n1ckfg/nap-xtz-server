@@ -18,12 +18,14 @@ node tools/brush-geometry/brush-geometry.mjs draw
 | `compare [stroke ...]` | scores every candidate geometry against the ideal brush |
 | `checks` | asserts the shipped `toBrushQuads` holds up at the edges; exits non-zero on a failure |
 | `sheets [stroke ...]` | writes side-by-side PNGs: ideal, the old outline, what ships now |
-| `draw` | draws four strokes through a real `Frame` and exports them end to end |
+| `draw` | draws strokes through a real `Frame` and exports them end to end, budget ladder included |
 
 | Option | |
 | --- | --- |
 | `-e, --encoder <mode>` | `file` (default), `round`, or `truncate` |
 | `-o, --out <dir>` | where `sheets` and `draw` write (default: `tools/brush-geometry/out`) |
+| `-l, --limit <bytes>` | `draw`: the mint limit to fit under (default: 30000) |
+| `-s, --strokes <n>` | `draw`: how many strokes to draw (default: 4) |
 | `-h, --help` | usage, including what each column means |
 
 There are no dependencies beyond `three`, which the server already has. PNGs are
@@ -58,6 +60,23 @@ polygon at a time so no winding rule has an opinion about it.
 
 The three ratios are intersection-over-union of the filled pixels, where 1.0 is
 identical coverage.
+
+## The byte budget
+
+`convertToNAPLPS()` will not hand the wallet a drawing too big to mint: it
+re-encodes with a coarser brush until the result fits `maxNaplpsBytes`, up to
+five doublings of the tolerance. `draw` runs the same ladder and prints each
+pass, so `--limit` well below what a drawing needs is how to watch it work:
+
+```
+$ node tools/brush-geometry/brush-geometry.mjs draw --limit 800
+pass 1  tolerance 0.0020  73 polygons  1279 bytes
+pass 2  tolerance 0.0040  49 polygons   871 bytes
+pass 3  tolerance 0.0080  35 polygons   633 bytes
+```
+
+`--strokes` says how busy the drawing is; at the real 30 KB limit it takes
+around a hundred strokes before the first pass overshoots.
 
 ## The encoder switch
 
