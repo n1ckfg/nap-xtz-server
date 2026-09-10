@@ -8,6 +8,132 @@ const pointsTrimEnd = 5;
 const FLICKER_DURATION = 300; // ms
 const FLICKER_INTERVAL = 50; // ms
 
+// The pinch at each end of a stroke, in the stroke's own units, so a brush
+// doesn't start or stop with a flare.
+const TIP_RADIUS = 0.01;
+
+// The next three are in frame widths -- the 0..1 space toBrushQuads works in,
+// where 1 is the whole drawing, so 0.005 is about three pixels of a 640-wide one.
+const BRUSH_SIMPLIFY = 0.005; // how far simplification may move a point
+const MIN_STEP = 0.0005;      // 1/2048: a shorter step is a rounding error to the encoder
+const MIN_RADIUS = 0.0005;    // keeps a quad from collapsing into a line
+
+/**
+ * Ramer-Douglas-Peucker, over indices rather than points so that anything held
+ * per point -- here the brush radius -- can follow the centreline through it.
+ * (index.html has its own copy for SVG import; it returns points, and lives on
+ * `window` where a module can't reach it cleanly.)
+ * @param {{x: number, y: number}[]} points
+ * @param {number} epsilon - Tolerance in frame widths
+ * @param {number} first - First index of the span to simplify
+ * @param {number} last - Last index of the span
+ * @returns {number[]} Indices to keep, in order
+ */
+function simplifyIndices(points, epsilon, first, last) {
+    if (last - first < 2) return [first, last];
+
+    let maxDist = 0;
+    let maxIdx = first;
+    for (let i = first + 1; i < last; i++) {
+        const dist = pointLineDist(points[i], points[first], points[last]);
+        if (dist > maxDist) {
+            maxDist = dist;
+            maxIdx = i;
+        }
+    }
+
+    if (maxDist > epsilon) {
+        const left = simplifyIndices(points, epsilon, first, maxIdx);
+        const right = simplifyIndices(points, epsilon, maxIdx, last);
+        return left.slice(0, -1).concat(right);
+    }
+    return [first, last];
+}
+
+/**
+ * Distance from a point to a line segment
+ * @returns {number}
+ */
+function pointLineDist(p, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+/**
+ * Simplifies a centreline, carrying its radii along
+ * @param {{points: {x: number, y: number}[], radii: number[]}} path
+ * @param {number} epsilon
+ * @returns {{points: {x: number, y: number}[], radii: number[]}}
+ */
+function simplifyPath(path, epsilon) {
+    if (path.points.length < 3) return path;
+
+    const keep = simplifyIndices(path.points, epsilon, 0, path.points.length - 1);
+    return {
+        points: keep.map(i => path.points[i]),
+        radii: keep.map(i => path.radii[i])
+    };
+}
+
+/**
+ * How far each quad has to reach past a corner to cover the wedge the next one
+ * leaves there: radius * tan(half the turn), which is nothing on a straight run
+ * and a whole radius at a right angle. Capped there, so a hairpin gets a blunt
+ * corner instead of a spike.
+ * @param {{x: number, y: number}[]} points - The simplified centreline
+ * @param {number[]} radii
+ * @returns {number[]} Reach at each point, ends included (and zero)
+ */
+function cornerReach(points, radii) {
+    const reach = points.map(() => 0);
+
+    for (let i = 1; i < points.length - 1; i++) {
+        const inX = points[i].x - points[i - 1].x;
+        const inY = points[i].y - points[i - 1].y;
+        const outX = points[i + 1].x - points[i].x;
+        const outY = points[i + 1].y - points[i].y;
+        const inLen = Math.hypot(inX, inY);
+        const outLen = Math.hypot(outX, outY);
+        if (inLen < MIN_STEP || outLen < MIN_STEP) continue;
+
+        const dot = (inX * outX + inY * outY) / (inLen * outLen);
+        const cross = Math.abs(inX * outY - inY * outX) / (inLen * outLen);
+        const halfTurn = cross / Math.max(1e-6, 1 + dot); // tan(turn / 2)
+
+        reach[i] = Math.min(1, halfTurn) * Math.max(radii[i], MIN_RADIUS);
+    }
+
+    return reach;
+}
+
+/**
+ * Whether any part of a polygon lies inside the 0..1 frame
+ * @param {{x: number, y: number}[]} poly
+ * @returns {boolean}
+ */
+function touchesFrame(poly) {
+    const xs = poly.map(p => p.x);
+    const ys = poly.map(p => p.y);
+    return Math.min(...xs) <= 1 && Math.max(...xs) >= 0 &&
+           Math.min(...ys) <= 1 && Math.max(...ys) >= 0;
+}
+
+/**
+ * @param {{x: number, y: number}} p
+ * @returns {{x: number, y: number}} The point pulled inside the 0..1 frame
+ */
+function clampToFrame(p) {
+    return {
+        x: Math.max(0, Math.min(1, p.x)),
+        y: Math.max(0, Math.min(1, p.y))
+    };
+}
+
 export class Stroke {
     constructor(color = 0xffffff) {
         this.points = [];
@@ -200,6 +326,24 @@ export class Stroke {
     }
 
     /**
+     * Brush radius at one point: tapered along the stroke and scaled by pressure,
+     * with both tips pinched to TIP_RADIUS
+     * @param {number} i - Point index
+     * @returns {number} Radius in the stroke's own units
+     */
+    radiusAt(i) {
+        const lastIndex = this.points.length - 1;
+        if (i <= 0 || i >= lastIndex) return TIP_RADIUS;
+
+        if (this.pressures.length !== this.points.length) {
+            this.computePressures();
+        }
+        const taper = Math.pow((lastIndex - i) / Math.max(1, lastIndex), this.taperPower);
+        const pressure = this.pressures[i] || 1.0;
+        return Math.max(this.minThickness * this.thickness, taper * pressure * this.thickness);
+    }
+
+    /**
      * Creates brush stroke geometry using quads perpendicular to stroke direction
      * Based on Yellowtail's compile() method by Golan Levin
      * @returns {THREE.BufferGeometry} The brush geometry
@@ -225,22 +369,7 @@ export class Stroke {
 
         for (let i = 0; i < nPoints; i++) {
             const p = this.points[i];
-
-            // First and last points: fixed small radius to avoid flare
-            let radius;
-            if (i === 0 || i === lastIndex) {
-                radius = 0.01;
-            } else {
-                // Calculate taper based on position (taper at end)
-                const taper = Math.pow((lastIndex - i) / Math.max(1, lastIndex), this.taperPower);
-
-                // Calculate radius at this point
-                const pressure = this.pressures[i] || 1.0;
-                radius = Math.max(
-                    this.minThickness * this.thickness,
-                    taper * pressure * this.thickness
-                );
-            }
+            const radius = this.radiusAt(i);
 
             // Calculate tangent direction
             let tangent = new THREE.Vector3();
@@ -262,8 +391,16 @@ export class Stroke {
                 tangent.divideScalar(tangentLength);
             }
 
-            // Calculate perpendicular in the stroke plane
-            const perp = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+            // Calculate perpendicular in the stroke plane. A stroke running
+            // along its own normal -- drawn straight at the camera, say -- has no
+            // perpendicular there, so fall back to one across the tangent rather
+            // than let the ribbon collapse to nothing.
+            const perp = new THREE.Vector3().crossVectors(tangent, normal);
+            if (perp.lengthSq() < 1e-8) {
+                perp.set(-tangent.y, tangent.x, 0);
+                if (perp.lengthSq() < 1e-8) perp.set(0, 1, 0);
+            }
+            perp.normalize();
 
             // Create left and right edge points
             const left = p.clone().addScaledVector(perp, radius);
@@ -304,69 +441,120 @@ export class Stroke {
     }
 
     /**
-     * Returns the outline points of the brush stroke as a closed polygon
-     * Left edge forward, then right edge reversed
-     * @returns {THREE.Vector3[]} Array of outline points forming a closed polygon
+     * Projects the stroke into the flat 0..1 space the NAPLPS encoder works in,
+     * measuring the brush width there rather than in 3D: a point offset along
+     * widthAxis is projected beside each centre point, so the width follows
+     * perspective and survives however the stroke was drawn -- including one
+     * drawn straight at the camera, which has no width in its own plane at all.
+     *
+     * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
+     * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
+     * @returns {{points: {x: number, y: number}[], radii: number[]}} Centreline and its 2D radii
      */
-    toBrushOutline() {
+    toScreenPath(project, widthAxis) {
+        const points = [];
+        const radii = [];
+        const probe = new THREE.Vector3();
+        const lastIndex = this.points.length - 1;
+
+        for (let i = 0; i <= lastIndex; i++) {
+            const centre = project(this.points[i]);
+
+            probe.copy(this.points[i]).addScaledVector(widthAxis, this.radiusAt(i));
+            const edge = project(probe);
+            const radius = Math.hypot(edge.x - centre.x, edge.y - centre.y);
+
+            // A point the encoder can't tell from the last one costs four bytes
+            // and says nothing -- but never drop the tip, or the stroke shortens,
+            // and keep the widest radius of the points that fall together so a
+            // slow passage doesn't come out thin.
+            const previous = points[points.length - 1];
+            if (previous && i !== lastIndex &&
+                Math.hypot(centre.x - previous.x, centre.y - previous.y) < MIN_STEP) {
+                radii[radii.length - 1] = Math.max(radii[radii.length - 1], radius);
+                continue;
+            }
+
+            points.push(centre);
+            radii.push(radius);
+        }
+
+        return { points, radii };
+    }
+
+    /**
+     * The stroke as a run of short filled polygons -- one quad per segment of the
+     * simplified centreline -- in the 0..1 space NAPLPS draws in.
+     *
+     * This is the shape the format wants. A quad built on one segment's own
+     * perpendicular is convex, so every renderer fills it alike whichever winding
+     * rule it uses, where a single long outline of the whole stroke crosses itself
+     * at every tight turn and fills differently on each. Four points is also short
+     * enough that the encoder's running delta cursor is reset before its rounding
+     * error can accumulate into visible drift. Consecutive quads reach a little
+     * way into each other -- see cornerReach() -- so no gap shows at a turn.
+     *
+     * @param {(point: THREE.Vector3) => {x: number, y: number}} project - a point of this stroke to 2D
+     * @param {THREE.Vector3} widthAxis - a direction across the view, in this stroke's own space
+     * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
+     * @returns {{x: number, y: number}[][]} Closed 4-point polygons, in drawing order
+     */
+    toBrushQuads(project, widthAxis, epsilon = BRUSH_SIMPLIFY) {
         if (this.points.length < 2) return [];
 
-        // Compute pressures if not already set
-        if (this.pressures.length !== this.points.length) {
-            this.computePressures();
+        const { points, radii } = simplifyPath(this.toScreenPath(project, widthAxis), epsilon);
+        const lastSegment = points.length - 2;
+        const reach = cornerReach(points, radii);
+        const quads = [];
+
+        for (let i = 0; i <= lastSegment; i++) {
+            const a = points[i];
+            const b = points[i + 1];
+            const length = Math.hypot(b.x - a.x, b.y - a.y);
+            if (length < MIN_STEP) continue;
+
+            const tx = (b.x - a.x) / length;
+            const ty = (b.y - a.y) / length;
+            const ra = Math.max(radii[i], MIN_RADIUS);
+            const rb = Math.max(radii[i + 1], MIN_RADIUS);
+
+            // Reach into the neighbouring segments, but not past the stroke's own ends
+            const back = i > 0 ? reach[i] : 0;
+            const forward = i < lastSegment ? reach[i + 1] : 0;
+            const ax = a.x - tx * back;
+            const ay = a.y - ty * back;
+            const bx = b.x + tx * forward;
+            const by = b.y + ty * forward;
+
+            const quad = [
+                { x: ax - ty * ra, y: ay + tx * ra },
+                { x: bx - ty * rb, y: by + tx * rb },
+                { x: bx + ty * rb, y: by - tx * rb },
+                { x: ax + ty * ra, y: ay - tx * ra }
+            ];
+
+            // The encoder silently drops a point outside the frame, and every
+            // point after it in that polygon is a delta from the one dropped, so
+            // the rest of the shape lands somewhere else entirely. Keep the quads
+            // that touch the frame and clamp them into it; skip the rest.
+            if (touchesFrame(quad)) quads.push(quad.map(clampToFrame));
         }
 
-        const normal = this.computeNormal();
-        const nPoints = this.points.length;
-        const lastIndex = nPoints - 1;
-
-        const leftEdge = [];
-        const rightEdge = [];
-
-        for (let i = 0; i < nPoints; i++) {
-            const p = this.points[i];
-
-            // First and last points: fixed small radius
-            let radius;
-            if (i === 0 || i === lastIndex) {
-                radius = 0.01;
-            } else {
-                const taper = Math.pow((lastIndex - i) / Math.max(1, lastIndex), this.taperPower);
-                const pressure = this.pressures[i] || 1.0;
-                radius = Math.max(
-                    this.minThickness * this.thickness,
-                    taper * pressure * this.thickness
-                );
-            }
-
-            // Calculate tangent direction
-            let tangent = new THREE.Vector3();
-            if (i === 0) {
-                tangent.subVectors(this.points[1], p);
-            } else if (i === lastIndex) {
-                tangent.subVectors(p, this.points[i - 1]);
-            } else {
-                tangent.subVectors(this.points[i + 1], this.points[i - 1]);
-            }
-
-            const tangentLength = tangent.length();
-            if (tangentLength < 0.0001) {
-                tangent.set(1, 0, 0);
-            } else {
-                tangent.divideScalar(tangentLength);
-            }
-
-            // Calculate perpendicular in the stroke plane
-            const perp = new THREE.Vector3().crossVectors(tangent, normal).normalize();
-
-            // Create left and right edge points
-            leftEdge.push(p.clone().addScaledVector(perp, radius));
-            rightEdge.push(p.clone().addScaledVector(perp, -radius));
+        // A stroke can land on a single spot -- drawn straight at the camera, or
+        // held still. There was paint on it, so leave a dab rather than nothing.
+        if (quads.length === 0 && points.length > 0) {
+            const r = Math.max(...radii, MIN_RADIUS);
+            const c = points[0];
+            const dab = [
+                { x: c.x - r, y: c.y - r },
+                { x: c.x + r, y: c.y - r },
+                { x: c.x + r, y: c.y + r },
+                { x: c.x - r, y: c.y + r }
+            ];
+            if (touchesFrame(dab)) quads.push(dab.map(clampToFrame));
         }
 
-        // Build outline: left edge forward, then right edge reversed
-        const outline = [...leftEdge, ...rightEdge.reverse()];
-        return outline;
+        return quads;
     }
 }
 

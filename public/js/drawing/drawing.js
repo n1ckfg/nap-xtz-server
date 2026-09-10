@@ -1199,12 +1199,40 @@ function convertToNAPLPS() {
 
     const input = [];
 
+    frame.updateWorldMatrix(true, false); // the loop may already be stopped
+
+    // Strokes are kept in the frame's own space, and the frame rides on the node
+    // the two-handed gesture moves, so a point has to go through that transform
+    // before the camera sees it -- otherwise a drawing that was zoomed or turned
+    // encodes in the pose it was drawn in rather than the one on screen.
+    const project = (point) => {
+        const projected = frame.localToWorld(point.clone()).project(camera);
+
+        // NDC: x=-1 is left, x=1 is right; y=-1 is bottom, y=1 is top
+        // NAPLPS: x=0 is left, x=1 is right; y=0 is top, y=1 is bottom
+        const nx = (projected.x + 1) / 2;
+
+        // The main canvas renders NAPLPS into a SQUARE 640x640 space, so the
+        // 4:3 view's vertical extent must be compressed by 480/640 (= 1/DRAW_ASPECT)
+        // and pushed down by the remainder, matching the SVG-import convention
+        // (y/sH*0.75 + 0.25). Without this the drawing looks horizontally squeezed.
+        const vScale = 1 / DRAW_ASPECT; // 0.75
+        const ny = ((1 - projected.y) / 2) * vScale + (1 - vScale); // Flip Y, fit 4:3
+
+        return { x: nx, y: ny };
+    };
+
+    // Brush width is measured across the view, so it never depends on which way
+    // the stroke happens to face. The camera's right vector, carried back into
+    // the frame's space, is that direction where the stroke's points live.
+    const toStrokeSpace = new THREE.Matrix3().setFromMatrix4(frame.matrixWorld).invert();
+    const widthAxis = new THREE.Vector3()
+        .setFromMatrixColumn(camera.matrixWorld, 0)
+        .applyMatrix3(toStrokeSpace)
+        .normalize();
+
     for (const stroke of frame.strokes) {
         if (!stroke.points || stroke.points.length < 2) continue;
-
-        // Get brush outline (closed polygon) instead of centerline
-        const outline3D = stroke.toBrushOutline();
-        if (outline3D.length < 3) continue;
 
         // Convert hex color to RGB Vector3 (0-255)
         const hex = stroke.color || 0xffffff;
@@ -1213,39 +1241,11 @@ function convertToNAPLPS() {
         const b = hex & 0xff;
         const color = new window.Vector3(r, g, b);
 
-        // Project 3D outline points to 2D normalized coordinates
-        let points2D = [];
-        for (const pt of outline3D) {
-            // Clone point and project to NDC (-1 to 1)
-            const projected = pt.clone().project(camera);
-
-            // Convert NDC to normalized 0-1 coordinates
-            // NDC: x=-1 is left, x=1 is right; y=-1 is bottom, y=1 is top
-            // NAPLPS: x=0 is left, x=1 is right; y=0 is top, y=1 is bottom
-            const nx = (projected.x + 1) / 2;
-
-            // The main canvas renders NAPLPS into a SQUARE 640x640 space, so the
-            // 4:3 view's vertical extent must be compressed by 480/640 (= 1/DRAW_ASPECT)
-            // and pushed down by the remainder, matching the SVG-import convention
-            // (y/sH*0.75 + 0.25). Without this the drawing looks horizontally squeezed.
-            const vScale = 1 / DRAW_ASPECT; // 0.75
-            let ny = ((1 - projected.y) / 2) * vScale + (1 - vScale); // Flip Y, fit 4:3
-
-            // Clamp to valid range
-            const clampedX = Math.max(0, Math.min(1, nx));
-            const clampedY = Math.max(0, Math.min(1, ny));
-
-            points2D.push(new window.Vector2(clampedX, clampedY));
+        // One short filled polygon per segment of the stroke: see toBrushQuads()
+        for (const quad of stroke.toBrushQuads(project, widthAxis)) {
+            const points2D = quad.map(p => new window.Vector2(p.x, p.y));
+            input.push(new window.NapInputWrapper(color, points2D, true));
         }
-
-        // Simplify points using RDP algorithm
-        if (window.rdpSimplify) {
-            points2D = window.rdpSimplify(points2D, 0.002);
-        }
-
-        // Create NapInputWrapper as filled polygon
-        const napStroke = new window.NapInputWrapper(color, points2D, true);
-        input.push(napStroke);
     }
 
     if (input.length === 0) {
@@ -1263,7 +1263,7 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
-    console.log(`Converted ${input.length} strokes to NAPLPS`);
+    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons) to NAPLPS`);
     return encoder.napRaw;
 }
 
