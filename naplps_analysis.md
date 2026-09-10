@@ -1,5 +1,10 @@
 # Analysis of NAPLPS Corruption in Drawing Mode
 
+> **Superseded.** The vertex-limit theory below was tested and did not hold:
+> the Pi's decoder has no fixed buffers, and the sample files already carry
+> polygons of up to 239 points. See `naplps_analysis_2.md` for what was
+> actually wrong.
+
 After analyzing the codebase across `drawing.js`, `index.html`, `naplps.js`, and `app.js`, the issue causing drawn NAPLPS images to corrupt when decoded on the Raspberry Pi stems from the number of vertices generated per stroke.
 
 ## The Problem

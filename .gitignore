@@ -3,6 +3,7 @@
 public/uploads/*
 public/sounds/sgm_plus/*
 public/demo/*
+tools/brush-geometry/out/
 
 *.csr
 *.crt

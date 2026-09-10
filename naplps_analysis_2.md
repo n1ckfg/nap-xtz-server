@@ -109,3 +109,28 @@ size and point counts are byte-for-byte identical before and after, and all 47
   switch replaces a received drawing with its own `bin/data` files after
   `slide_timeout` (30 s by default), and progressive draw reveals one point per
   command every 66 ms, so a dense drawing takes a few seconds to fill in.
+
+## Where this landed
+
+Both this note and the geometry work that followed it were reverted in `35d18e2`
+and restored afterwards, so read the dates rather than the tree if the two
+disagree. As it now stands:
+
+- `makeNapVector2` rounds, clamped into the field, as above.
+- A zero delta is written positive. Sign was taken from `input.x > 0`, so two
+  points sharing an x or a y — which every axis-aligned edge has, and which a
+  run of coordinates clamped to the frame edge has — went out negative. A
+  negative y delta of zero magnitude decodes as a whole frame of displacement,
+  and every point after it in the polygon inherits it, so the tail of the stroke
+  left the frame and both renderers dropped it.
+- The long outline this note describes is gone. `Stroke.toBrushOutline()` was
+  replaced by `toBrushPolygons()`, which lays short filled polygons along the
+  stroke instead of one closed outline around it; see ARCHITECTURE.md. Drift is
+  bounded by construction there — every polygon is a `SET & POLY`, whose first
+  point is absolute, so the running delta cursor resets every three or four
+  points — which is why the "very long polygons still drift" loose end above no
+  longer has anything to bite on.
+
+`tools/brush-geometry` measures all of it: `compare` scores the geometries
+against each other, `--encoder truncate|round` separates what the geometry costs
+from what the encoder costs, and `checks` guards the edges.

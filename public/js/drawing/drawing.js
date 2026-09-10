@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Controller } from './controller.js';
 import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
-import { Frame } from './tools.js';
+import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
 import { Palette } from './palette.js';
 
 let gestureRecognizer;
@@ -30,6 +30,16 @@ const _drawPos = new THREE.Vector3();
 // The drawing view renders at 4:3 to match the main p5 canvas (640x480),
 // centered and letterboxed within the fullscreen container.
 const DRAW_ASPECT = 640 / 480;
+
+// A minted drawing has to fit the chain: app.js refuses one over its own
+// TEZOS_MAX_BYTES, which GET /api/config reports. The default here is that
+// route's default, and startDrawingMode() replaces it with the real figure.
+const DEFAULT_MAX_NAPLPS_BYTES = 30000;
+let maxNaplpsBytes = DEFAULT_MAX_NAPLPS_BYTES;
+
+// How many times convertToNAPLPS() may coarsen the brush to get under it.
+// Five doublings takes the tolerance from a couple of pixels to about twenty.
+const MAX_SIMPLIFY_PASSES = 5;
 
 // Largest 4:3 box that fits the window ("contain"), plus its centering offset.
 function getDrawSize() {
@@ -1071,6 +1081,17 @@ export async function startDrawingMode(container) {
     // Store reference to container for cleanup
     window._drawingContainer = container;
 
+    // Ask the backend what a token may weigh, without holding drawing mode up
+    // for it: NapClient caches the reply, and nothing is encoded until a stroke
+    // has been drawn. If the call fails the default above stands.
+    if (window.NapClient && typeof window.NapClient.getConfig === 'function') {
+        window.NapClient.getConfig()
+            .then(config => {
+                if (config && config.maxNaplpsBytes > 0) maxNaplpsBytes = config.maxNaplpsBytes;
+            })
+            .catch(err => console.warn('[nap-xtz] using the default size limit:', err.message));
+    }
+
     // Show loading indicator
     const loadingEl = container.querySelector('#loading') || document.getElementById('loading');
     if (loadingEl) {
@@ -1197,64 +1218,100 @@ function convertToNAPLPS() {
         return null;
     }
 
-    const input = [];
+    frame.updateWorldMatrix(true, false); // the loop may already be stopped
 
-    for (const stroke of frame.strokes) {
-        if (!stroke.points || stroke.points.length < 2) continue;
+    // Strokes are kept in the frame's own space, and the frame rides on the node
+    // the two-handed gesture moves, so a point has to go through that transform
+    // before the camera sees it -- otherwise a drawing that was zoomed or turned
+    // encodes in the pose it was drawn in rather than the one on screen.
+    const project = (point) => {
+        const projected = frame.localToWorld(point.clone()).project(camera);
 
-        // Get brush outline (closed polygon) instead of centerline
-        const outline3D = stroke.toBrushOutline();
-        if (outline3D.length < 3) continue;
+        // NDC: x=-1 is left, x=1 is right; y=-1 is bottom, y=1 is top
+        // NAPLPS: x=0 is left, x=1 is right; y=0 is top, y=1 is bottom
+        const nx = (projected.x + 1) / 2;
 
-        // Convert hex color to RGB Vector3 (0-255)
-        const hex = stroke.color || 0xffffff;
-        const r = (hex >> 16) & 0xff;
-        const g = (hex >> 8) & 0xff;
-        const b = hex & 0xff;
-        const color = new window.Vector3(r, g, b);
+        // The main canvas renders NAPLPS into a SQUARE 640x640 space, so the
+        // 4:3 view's vertical extent must be compressed by 480/640 (= 1/DRAW_ASPECT)
+        // and pushed down by the remainder, matching the SVG-import convention
+        // (y/sH*0.75 + 0.25). Without this the drawing looks horizontally squeezed.
+        const vScale = 1 / DRAW_ASPECT; // 0.75
+        const ny = ((1 - projected.y) / 2) * vScale + (1 - vScale); // Flip Y, fit 4:3
 
-        // Project 3D outline points to 2D normalized coordinates
-        let points2D = [];
-        for (const pt of outline3D) {
-            // Clone point and project to NDC (-1 to 1)
-            const projected = pt.clone().project(camera);
+        return { x: nx, y: ny };
+    };
 
-            // Convert NDC to normalized 0-1 coordinates
-            // NDC: x=-1 is left, x=1 is right; y=-1 is bottom, y=1 is top
-            // NAPLPS: x=0 is left, x=1 is right; y=0 is top, y=1 is bottom
-            const nx = (projected.x + 1) / 2;
+    // Brush width is measured across the view, so it never depends on which way
+    // the stroke happens to face. The camera's right vector, carried back into
+    // the frame's space, is that direction where the stroke's points live.
+    const toStrokeSpace = new THREE.Matrix3().setFromMatrix4(frame.matrixWorld).invert();
+    const widthAxis = new THREE.Vector3()
+        .setFromMatrixColumn(camera.matrixWorld, 0)
+        .applyMatrix3(toStrokeSpace)
+        .normalize();
 
-            // The main canvas renders NAPLPS into a SQUARE 640x640 space, so the
-            // 4:3 view's vertical extent must be compressed by 480/640 (= 1/DRAW_ASPECT)
-            // and pushed down by the remainder, matching the SVG-import convention
-            // (y/sH*0.75 + 0.25). Without this the drawing looks horizontally squeezed.
-            const vScale = 1 / DRAW_ASPECT; // 0.75
-            let ny = ((1 - projected.y) / 2) * vScale + (1 - vScale); // Flip Y, fit 4:3
+    // Every stroke's polygons at one simplification tolerance. Fresh Vector2s
+    // each time: NapEncoder flips a point's y in place as it encodes, so a
+    // second pass over the same objects would come out upside down.
+    const buildInput = (epsilon) => {
+        const input = [];
 
-            // Clamp to valid range
-            const clampedX = Math.max(0, Math.min(1, nx));
-            const clampedY = Math.max(0, Math.min(1, ny));
+        for (const stroke of frame.strokes) {
+            if (!stroke.points || stroke.points.length < 2) continue;
 
-            points2D.push(new window.Vector2(clampedX, clampedY));
+            // Convert hex color to RGB Vector3 (0-255)
+            const hex = stroke.color || 0xffffff;
+            const r = (hex >> 16) & 0xff;
+            const g = (hex >> 8) & 0xff;
+            const b = hex & 0xff;
+            const color = new window.Vector3(r, g, b);
+
+            // Quads along the stroke, triangles where a quad would be fragile:
+            // see toBrushPolygons()
+            for (const polygon of stroke.toBrushPolygons(project, widthAxis, epsilon)) {
+                const points2D = polygon.map(p => new window.Vector2(p.x, p.y));
+                input.push(new window.NapInputWrapper(color, points2D, true));
+            }
         }
+        return input;
+    };
 
-        // Simplify points using RDP algorithm
-        if (window.rdpSimplify) {
-            points2D = window.rdpSimplify(points2D, 0.002);
-        }
-
-        // Create NapInputWrapper as filled polygon
-        const napStroke = new window.NapInputWrapper(color, points2D, true);
-        input.push(napStroke);
-    }
+    // A drawing that won't fit the chain is redrawn with a coarser brush rather
+    // than handed over to be refused: the shape survives losing points far
+    // better than the drawing survives a mint that never happens. Detail is
+    // only given up when it has to be -- the first pass is the brush as tuned.
+    let epsilon = BRUSH_SIMPLIFY;
+    let input = buildInput(epsilon);
 
     if (input.length === 0) {
         console.log('No valid strokes to encode');
         return null;
     }
 
-    // Encode to NAPLPS
-    const encoder = new window.NapEncoder(input);
+    let encoder = new window.NapEncoder(input);
+
+    for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && encoder.napRaw.length > maxNaplpsBytes; pass++) {
+        // Doubling alone can't leave zero, and zero is a brush tuned to keep
+        // every point it was given. Step onto the encoder's own quantum first:
+        // the coarsest tolerance that still discards nothing the format could
+        // have carried anyway.
+        epsilon = Math.max(epsilon * 2, MIN_STEP);
+        console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${maxNaplpsBytes} limit; ` +
+                    `simplifying at ${epsilon.toFixed(4)}`);
+
+        const simpler = buildInput(epsilon);
+        if (simpler.length === 0) break; // nothing left to give: keep what we have
+
+        input = simpler;
+        encoder = new window.NapEncoder(input);
+    }
+
+    if (encoder.napRaw.length > maxNaplpsBytes) {
+        // Encoded anyway: the canvas and the Raspberry Pi will take it even
+        // though a mint won't, and the wallet says so in its own words.
+        console.warn(`[nap-xtz] drawing is ${encoder.napRaw.length} bytes, still over the ` +
+                     `${maxNaplpsBytes} limit -- too much to mint`);
+    }
 
     // Load into the main canvas
     if (typeof window.loadTelidonFromText === 'function') {
@@ -1263,7 +1320,9 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
-    console.log(`Converted ${input.length} strokes to NAPLPS`);
+    const split = input.filter(polygon => polygon.points.length === 3).length;
+    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons, ` +
+                `${split} split for safety) to ${encoder.napRaw.length} bytes of NAPLPS`);
     return encoder.napRaw;
 }
 

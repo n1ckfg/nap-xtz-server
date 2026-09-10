@@ -1486,10 +1486,22 @@ class NapEncoder {
 
 		if (this.debug) console.log("Encoding vector input " + input.x + ", " + input.y + " ...");
 
-		const intX = parseInt(Math.abs(input.x) * this.maxBitVals);
-		const intY = parseInt(Math.abs(input.y) * this.maxBitVals);
-        //const intX = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.x) * this.maxBitVals));
-        //const intY = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.y) * this.maxBitVals));
+		// Round rather than truncate. Every point after the first is a delta, so
+		// a quantisation that always shortens one marches the decoder's running
+		// sum the same way at every step, and the error grows with the length of
+		// the polygon instead of staying at the quantum. Rounding leaves a random
+		// walk in its place. (parseInt was a hazard of its own besides: a value
+		// under 1e-6 stringifies in exponential notation, and parseInt(1e-7) is 1.)
+		//
+		// A magnitude of exactly 1.0 -- a coordinate on the far edge of the frame,
+		// or a delta that crosses it -- comes to maxBitVals, one past the field.
+		// binary() keeps the low bits, so it wraps to zero and the point lands at
+		// the opposite edge; hold it at the largest value the field can carry.
+		// The clamp is what makes rounding safe: a small negative delta is stored
+		// in two's complement as a magnitude just under 1.0, which rounds up into
+		// the overflow that truncation could never reach.
+		const intX = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.x) * this.maxBitVals));
+		const intY = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.y) * this.maxBitVals));
 		if (this.debug) console.log("Converting vector to int: " + intX + ", " + intY);
 
 		let binX = binary(intX, this.bitExponent); 
@@ -1499,10 +1511,15 @@ class NapEncoder {
 		for (let i=0; i<this.dataLength; i++) {
 			let vectorByte = "01";
 
-			// first bit is the sign
+			// First bit is the sign. Zero counts as positive: a zero delta -- two
+			// points sharing an x or a y, which any axis-aligned edge has -- was
+			// being written negative, and a negative y delta decodes as
+			// (cursor + 1 - magnitude), so the point came back a whole frame away
+			// and the renderer dropped it. makeNapPoints marks the one genuinely
+			// negative value that reaches here as zero, so it still reads as one.
 			switch (i) {
 				case 0:
-					if (input.x > 0) {
+					if (input.x >= 0 && !Object.is(input.x, -0)) {
 						vectorByte += "0";
 					} else {
 						vectorByte += "1";
@@ -1511,7 +1528,7 @@ class NapEncoder {
 					vectorByte += binX.charAt(0);
 					vectorByte += binX.charAt(1);
 
-					if (input.y > 0) {
+					if (input.y >= 0 && !Object.is(input.y, -0)) {
 						vectorByte += "0";
 					} else {
 						vectorByte += "1";
@@ -1622,7 +1639,11 @@ class NapEncoder {
 	                if (nv.x < nvLast.x) x = Math.abs(x) - 1;
 	                
 	                let y = Math.abs(nv.y) - Math.abs(nvLast.y);
-	                if (nv.y < nvLast.y) y = Math.abs(y) - 1;               
+	                if (nv.y < nvLast.y) y = Math.abs(y) - 1;
+	                // A step of exactly one frame lands on zero here, where a step
+	                // of none also sits. Negative zero keeps them apart: it carries
+	                // the same magnitude and the sign this one needs.
+	                if (nv.y < nvLast.y && y === 0) y = -0;               
 	                // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ 
 
 	                if (i === _points.length-1) {
