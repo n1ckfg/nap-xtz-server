@@ -1488,6 +1488,8 @@ class NapEncoder {
 
 		const intX = parseInt(Math.abs(input.x) * this.maxBitVals);
 		const intY = parseInt(Math.abs(input.y) * this.maxBitVals);
+        //const intX = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.x) * this.maxBitVals));
+        //const intY = Math.min(this.maxBitVals - 1, Math.round(Math.abs(input.y) * this.maxBitVals));
 		if (this.debug) console.log("Converting vector to int: " + intX + ", " + intY);
 
 		let binX = binary(intX, this.bitExponent); 
