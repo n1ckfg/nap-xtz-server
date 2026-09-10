@@ -312,10 +312,12 @@ a:hover {
 	font-size: 1em;
 	font-weight: bold;
 }
-/* ── UI visibility toggle (the "h" key) ──
+/* ── UI visibility toggle ("h", or moving the mouse) ──
    The page starts with every HTML overlay hidden so the canvas fills the
-   screen on its own; pressing "h" toggles the chrome back on. The class
-   is on <body> from the markup, so nothing flashes before the first paint. */
+   screen on its own; pressing "h" toggles the chrome back on, and moving the
+   mouse shows it — for five seconds in drawing mode, until "h" otherwise (see
+   index.html). The class is on <body> from the markup, so nothing flashes
+   before the first paint. */
 body.ui-hidden #container,
 body.ui-hidden #btn-exit-drawing,
 body.ui-hidden #drawing-container #loading,

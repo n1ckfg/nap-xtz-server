@@ -110,4 +110,16 @@ An ES-module-based 3D environment built on Three.js and MediaPipe:
 
 The 3D drawing mode is initialized via `startDrawingMode(container)` and torn down via `stopDrawingMode()`. When active, it takes over the screen to allow hand-tracked drawing via a webcam. When finished or exited, the drawn strokes can be serialized, encoded to NAPLPS, and either broadcast to other clients or minted to the blockchain.
 
-Held gestures are confirmed by expanding or shrinking circles before they fire. Thumbs-down undoes the last stroke, or clears the drawing with both hands; a single thumbs-up recentres the camera and world. **Double thumbs-up mints**: the strokes are encoded and `drawing.js` calls the wallet shim's `mintCurrentNaplps()`, so the signing still happens in `js/tezos/` and the backend still builds the operation. Drawing mode stays up through the mint — leaving it is the "Exit Drawing" button, which the "h" UI toggle reveals.
+Held gestures are confirmed by expanding or shrinking circles before they fire. Thumbs-down undoes the last stroke, or clears the drawing with both hands; a single thumbs-up recentres the camera and world. **Double thumbs-up mints**: the strokes are encoded and `drawing.js` calls the wallet shim's `mintCurrentNaplps()`, so the signing still happens in `js/tezos/` and the backend still builds the operation. Drawing mode stays up through the mint — leaving it is the "Exit Drawing" button, which the UI toggle reveals.
+
+### UI Visibility
+
+The page runs with every HTML overlay hidden (`.ui-hidden` on `<body>`, set in the markup so nothing flashes before the first paint), so the canvas fills the screen on its own. A single visible/hidden flag in `index.html` governs it, reached by "h" or by moving the mouse, and what those do depends on the mode:
+
+| | "h" | Mouse movement |
+| --- | --- | --- |
+| **Review mode** | toggles on and off | shows, and it stays until "h" hides it |
+| **Drawing mode** | shows for five seconds | shows for five seconds, each move pushing the five seconds back |
+
+The mouse only ever shows the chrome; "h" is the way to put it away. The split follows what the screen is for: a viewer who reaches for the mouse in review mode wants the controls to stay, while in drawing mode the artwork *is* the screen, so a stray nudge should not leave the chrome sitting over it. The idle timer belongs to drawing mode — leaving that mode with one pending drops it rather than hiding the chrome five seconds into review mode — and `setUIHidden(true)`, which drawing mode calls on entry, clears it too.
+

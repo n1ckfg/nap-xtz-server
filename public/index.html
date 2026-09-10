@@ -519,19 +519,68 @@
 		window.rdpSimplify = rdpSimplify;
 
 		// ── UI visibility ──
-		// Every HTML overlay is hidden by default for a clean fullscreen view;
-		// "h" toggles it back. Listening on the document means it also works
-		// while live drawing mode has the screen (that mode's own keys are
-		// w/a/s/d, so there is no conflict).
+		// One flag for the chrome, reached two ways. In review mode "h" toggles
+		// it and moving the mouse brings it up for good, since a viewer who
+		// reached for the mouse wants the controls. In drawing mode both put it
+		// up for five seconds only: the artwork is the screen there, and a
+		// stray nudge of the mouse should not leave the chrome sitting over it.
+		// Listening on the document means both work while drawing mode has the
+		// screen (that mode's own keys are w/a/s/d, so there is no conflict).
+		const UI_IDLE_TIMEOUT = 5000;
+
+		let uiVisible = false;
+		let uiHideTimer = null;
+		let uiLastActivity = 0;
+
+		function setUIVisible(visible) {
+			uiVisible = visible;
+			document.body.classList.toggle("ui-hidden", !visible);
+			if (uiHideTimer !== null) {
+				clearTimeout(uiHideTimer);
+				uiHideTimer = null;
+			}
+			if (visible && liveDrawingActive) armUIHideTimer();
+		}
+
+		// Each show or mouse move stamps the time and arms one timer rather than
+		// replacing it: mousemove fires dozens of times a second, and an early
+		// wake-up re-arms itself for whatever is left.
+		function armUIHideTimer() {
+			uiLastActivity = Date.now();
+			if (uiHideTimer === null) uiHideTimer = setTimeout(uiIdleCheck, UI_IDLE_TIMEOUT);
+		}
+
+		function uiIdleCheck() {
+			uiHideTimer = null;
+			// Leaving drawing mode takes the timeout with it — the chrome stays
+			// up in review mode until "h" puts it away.
+			if (!liveDrawingActive) return;
+			const idle = Date.now() - uiLastActivity;
+			if (idle < UI_IDLE_TIMEOUT) {
+				uiHideTimer = setTimeout(uiIdleCheck, UI_IDLE_TIMEOUT - idle);
+				return;
+			}
+			setUIVisible(false);
+		}
+
 		function toggleUI() {
-			document.body.classList.toggle("ui-hidden");
+			setUIVisible(!uiVisible);
 		}
 		window.toggleUI = toggleUI;
 
 		function setUIHidden(hidden) {
-			document.body.classList.toggle("ui-hidden", hidden);
+			setUIVisible(!hidden);
 		}
 		window.setUIHidden = setUIHidden;
+
+		document.addEventListener("mousemove", function() {
+			// The mouse only ever shows the chrome; "h" is what puts it away.
+			if (!uiVisible) {
+				setUIVisible(true);
+			} else if (liveDrawingActive) {
+				armUIHideTimer(); // push the five seconds back
+			}
+		});
 
 		document.addEventListener("keydown", function(e) {
 			if (e.key !== "h" && e.key !== "H") return;
@@ -562,7 +611,8 @@
 		</script>
 	</head>
 
-	<!-- Starts with the UI chrome hidden (see .ui-hidden in main.css); "h" toggles it. -->
+	<!-- Starts with the UI chrome hidden (see .ui-hidden in main.css); "h" or a
+	     mouse move brings it back. -->
 	<body class="ui-hidden">
 		<div id="container">
 			<div class="sketch">
@@ -647,7 +697,7 @@
 				telidon = [];
 				liveDrawingActive = true; // block slideshow while drawing
 				stopSlideshow();
-				setUIHidden(true); // drawing mode always starts clean, whatever "h" left behind
+				setUIHidden(true); // drawing mode always starts clean, however it was left
 				drawingContainer.classList.add('active');
 				await startDrawingMode(drawingContainer);
 			}
@@ -663,8 +713,9 @@
 			document.getElementById('btn-exit-drawing').addEventListener('click', exitDrawingMode);
 
 			// The page opens straight into live drawing, with the UI chrome hidden
-			// (see .ui-hidden in main.css) — press "h" for the controls, including
-			// Exit Drawing, which drops back to the NAPLPS viewer.
+			// (see .ui-hidden in main.css) — press "h", or move the mouse, for a
+			// five-second look at the controls, including Exit Drawing, which
+			// drops back to the NAPLPS viewer.
 			enterDrawingMode();
 		</script>
 	</body>
