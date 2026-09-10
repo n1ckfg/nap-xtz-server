@@ -717,6 +717,12 @@
 				drawingContainer.classList.remove('active');
 				liveDrawingActive = false;
 				loop(); // refresh the main canvas (handles exit with no strokes drawn)
+				// Review mode opens on the newest token rather than on the empty
+				// canvas drawing mode left behind -- and that is where the arrow keys
+				// start reading. The Pi is left alone: it has had every mint from the
+				// watcher already, so this is a screen returning to rest, not a
+				// decision to change what the Pi is showing.
+				loadLatestToken();
 			}
 
 			document.getElementById('btn-live-drawing').addEventListener('click', enterDrawingMode);
