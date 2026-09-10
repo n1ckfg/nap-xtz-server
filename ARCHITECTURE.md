@@ -64,6 +64,7 @@ Note that drawings bound for the Pi are checked against `RPI_MAX_BYTES` (default
 | `GET /api/rpi/status` | Which Pis are configured, and which are currently connected |
 | `POST /api/rpi/naplps` | Sends a drawing to the Pis *only* — no broadcast to other clients |
 | `POST /api/rpi/command` | Sends `take_photo` or `stream_photo` to every Pi |
+| `POST /redeploy` | GitHub webhook endpoint to automatically pull latest changes and restart the server |
 
 The same three are reachable over the sockets, for clients that already hold a connection: `rpi_naplps` and `rpi_command` on socket.io, or messages of those `type`s (and the bare command strings) on raw `ws`.
 
@@ -103,6 +104,7 @@ An ES-module-based 3D environment built on Three.js and MediaPipe:
 - `drawing.js` - Main entry point. Sets up the Three.js scene, camera, and MediaPipe hand tracking.
 - `tools.js` - `Stroke` and `Frame` classes for managing 3D lines and points.
 - `controller.js` - Hand controller wrappers that process raw MediaPipe landmarks, using Kalman filtering for smooth gesture recognition.
+- `mouse.js` - Mouse controller that projects mouse input into 3D space for drawing and palette interaction.
 - `palette.js` - Interactive color selection wheel.
 - `worldscale.js` - Implements two-handed pinch/zoom/rotate gestures to manipulate the 3D drawing canvas.
 
