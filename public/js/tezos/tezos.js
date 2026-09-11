@@ -21,13 +21,26 @@ function setStatus(msg, isError) {
     el.style.color = isError ? "#ff6666" : "#ffcc00";
 }
 
+// The verdict is the backend's: TEZOS_MAX_BYTES, reported by GET /api/config.
+// The page keeps no figure of its own, so the line waits for the config (a
+// moment, the first time), and with no backend to ask it shows the size alone.
 function setSize(msg, isError) {
+    NapClient.getConfig().then(function(config) {
+        showSize(msg, isError, config.maxNaplpsBytes);
+    }, function() {
+        showSize(msg, isError, null);
+    });
+}
+
+function showSize(msg, isError, limit) {
     const el = document.getElementById("tezos-size");
     if (!el) return;
-    const limit = _config ? _config.maxNaplpsBytes : 30000;
-    if (isError || parseInt(msg) > limit) {
+    if (isError || (limit && parseInt(msg) > limit)) {
         el.style.color = "#ff6666";
         el.textContent = "size: " + msg + " ... too large";
+    } else if (!limit) {
+        el.style.color = "#ffffff";
+        el.textContent = "size: " + msg;
     } else {
         el.style.color = "#ccff00";
         el.textContent = "size: " + msg + " ... ready to publish";

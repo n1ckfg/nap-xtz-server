@@ -11,6 +11,17 @@ const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv").config();
 
+// The mint size limit is checked before anything starts listening: a
+// TEZOS_MAX_BYTES that isn't a whole number would switch the size check off
+// rather than set it (see mint-limit.js).
+const { readMintLimit } = require("./mint-limit");
+const mintLimit = readMintLimit();
+if (mintLimit.error) {
+    console.error("\n" + mintLimit.error + " Not starting -- fix it (in .env or the environment), " +
+                  "or leave it out for the default.");
+    process.exit(1);
+}
+
 // DEBUG arrives from the environment as a string, so "false" is still truthy.
 // Only an explicit "false" turns on the https/redirect production path.
 const debug = String(process.env.DEBUG || "true").toLowerCase() !== "false";
@@ -83,8 +94,9 @@ const TEZOS = {
     rpcUrl:       process.env.TEZOS_RPC       || "https://rpc.shadownet.teztnets.com",
     networkName:  process.env.TEZOS_NETWORK   || "shadownet",
     explorerBase: process.env.TEZOS_EXPLORER  || "https://shadownet.tzkt.io",
-    // Tezos operations have a ~32 KB hard limit; leave headroom for the envelope.
-    maxNaplpsBytes: parseInt(process.env.TEZOS_MAX_BYTES || "30000", 10),
+    // The largest drawing a mint may carry: TEZOS_MAX_BYTES, checked at the top
+    // of this file (mint-limit.js has the default, and why it's read so strictly).
+    maxNaplpsBytes: mintLimit.value,
     pollInterval:   parseInt(process.env.TEZOS_POLL_SECONDS || "30", 10) * 1000,
     requestTimeout: parseInt(process.env.TEZOS_TIMEOUT_SECONDS || "20", 10) * 1000,
     // Catch-up cap, so a long outage doesn't fire off hundreds of reads at once.

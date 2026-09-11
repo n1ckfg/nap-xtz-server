@@ -7,7 +7,7 @@
 
 const NapClient = (function() {
 
-    let _config = null;
+    let _configRequest = null;
     let _socket = null;
     let _drawingMode = null;   // { active, interval }, once the page has said
     const _naplpsHandlers = [];
@@ -24,10 +24,18 @@ const NapClient = (function() {
         return body;
     }
 
-    // Server-supplied settings (network, rpc, size limit) fetched once.
-    async function getConfig() {
-        if (!_config) _config = await api("/api/config");
-        return _config;
+    // Server-supplied settings (network, rpc, size limit) fetched once, the one
+    // request shared by everything that asks -- the status line and drawing
+    // mode both want the size limit from the moment the page opens. A request
+    // that fails is forgotten, so the next ask tries again.
+    function getConfig() {
+        if (!_configRequest) {
+            _configRequest = api("/api/config").catch(function(e) {
+                _configRequest = null;
+                throw e;
+            });
+        }
+        return _configRequest;
     }
 
     // ── Chain, by proxy ──

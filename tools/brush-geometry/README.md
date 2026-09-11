@@ -26,12 +26,12 @@ node tools/brush-geometry/brush-geometry.mjs loss
 | --- | --- |
 | `-e, --encoder <mode>` | `file` (default), `round`, or `truncate` |
 | `-o, --out <dir>` | where `sheets` and `draw` write (default: `tools/brush-geometry/out`) |
-| `-l, --limit <bytes>` | `draw`: the mint limit to fit under (default: 30000) |
+| `-l, --limit <bytes>` | `draw`: the mint limit to fit under (default: the server's `TEZOS_MAX_BYTES` — see *The byte budget*) |
 | `-t, --tolerance <n>` | `draw`: where the ladder starts; `0` is the brush that keeps every point |
 | `-s, --strokes <n>` | `draw`: how many strokes to draw (default: 4) |
 | `-h, --help` | usage, including what each column means |
 
-There are no dependencies beyond `three`, which the server already has. PNGs are
+There are no dependencies beyond `three` and `dotenv`, both of which the server already has. PNGs are
 written by `tools/thumbnail-maker`.
 
 ## What it measures against
@@ -78,8 +78,14 @@ pass 2  tolerance 0.0040  49 polygons   871 bytes
 pass 3  tolerance 0.0080  35 polygons   633 bytes
 ```
 
-`--strokes` says how busy the drawing is; at the real 30 KB limit it takes
-around a hundred strokes before the first pass overshoots. `--tolerance 0` is
+Without `--limit`, the budget is the server's own: `TEZOS_MAX_BYTES`, read with
+the server's code in `mint-limit.js` — from the environment, else from the
+repo's `.env`, else the default of 30000 — so the tool and the mint agree on
+what fits, and on what isn't a valid setting. The last line of `draw` says
+which of those it used.
+
+`--strokes` says how busy the drawing is; at the default 30,000-byte limit it
+takes around a hundred strokes before the first pass overshoots. `--tolerance 0` is
 the case worth keeping an eye on: a brush that keeps every point starts the
 ladder at zero, and the rungs have to step onto the encoder's quantum to move at
 all.

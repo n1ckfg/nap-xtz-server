@@ -33,11 +33,28 @@ const _drawPos = new THREE.Vector3();
 // centered and letterboxed within the fullscreen container.
 const DRAW_ASPECT = 640 / 480;
 
-// A minted drawing has to fit the chain: app.js refuses one over its own
-// TEZOS_MAX_BYTES, which GET /api/config reports. The default here is that
-// route's default, and startDrawingMode() replaces it with the real figure.
-const DEFAULT_MAX_NAPLPS_BYTES = 30000;
-let maxNaplpsBytes = DEFAULT_MAX_NAPLPS_BYTES;
+// A minted drawing has to fit the chain: app.js refuses one over its
+// TEZOS_MAX_BYTES (set in .env), which GET /api/config reports. There is no
+// figure of our own -- until the config has come this is null, and a drawing
+// encoded meanwhile isn't fitted to anything. mintDrawing() waits for it.
+let maxNaplpsBytes = null;
+
+// Fetches the limit if it hasn't come yet. Resolves to it, or to null when the
+// backend can't be reached -- in which case it can't mint either.
+function loadSizeLimit() {
+    if (!window.NapClient || typeof window.NapClient.getConfig !== 'function') {
+        return Promise.resolve(maxNaplpsBytes);
+    }
+    return window.NapClient.getConfig()
+        .then(config => {
+            if (config && config.maxNaplpsBytes > 0) maxNaplpsBytes = config.maxNaplpsBytes;
+            return maxNaplpsBytes;
+        })
+        .catch(err => {
+            console.warn('[nap-xtz] no size limit from the backend:', err.message);
+            return maxNaplpsBytes;
+        });
+}
 
 // How many times convertToNAPLPS() may coarsen the brush to get under it.
 // Five doublings takes the tolerance from a couple of pixels to about twenty.
@@ -1106,14 +1123,8 @@ export async function startDrawingMode(container) {
 
     // Ask the backend what a token may weigh, without holding drawing mode up
     // for it: NapClient caches the reply, and nothing is encoded until a stroke
-    // has been drawn. If the call fails the default above stands.
-    if (window.NapClient && typeof window.NapClient.getConfig === 'function') {
-        window.NapClient.getConfig()
-            .then(config => {
-                if (config && config.maxNaplpsBytes > 0) maxNaplpsBytes = config.maxNaplpsBytes;
-            })
-            .catch(err => console.warn('[nap-xtz] using the default size limit:', err.message));
-    }
+    // has been drawn. If the call fails, mintDrawing() asks again.
+    loadSizeLimit();
 
     // Show loading indicator
     const loadingEl = container.querySelector('#loading') || document.getElementById('loading');
@@ -1313,13 +1324,17 @@ function convertToNAPLPS() {
 
     let encoder = new window.NapEncoder(input);
 
-    for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && encoder.napRaw.length > maxNaplpsBytes; pass++) {
+    // Null until the backend's figure has come (see maxNaplpsBytes), and with
+    // no limit there is nothing to fit.
+    const limit = maxNaplpsBytes;
+
+    for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && limit !== null && encoder.napRaw.length > limit; pass++) {
         // Doubling alone can't leave zero, and zero is a brush tuned to keep
         // every point it was given. Step onto the encoder's own quantum first:
         // the coarsest tolerance that still discards nothing the format could
         // have carried anyway.
         epsilon = Math.max(epsilon * 2, MIN_STEP);
-        console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${maxNaplpsBytes} limit; ` +
+        console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${limit} limit; ` +
                     `simplifying at ${epsilon.toFixed(4)}`);
 
         const simpler = buildInput(epsilon);
@@ -1329,11 +1344,13 @@ function convertToNAPLPS() {
         encoder = new window.NapEncoder(input);
     }
 
-    if (encoder.napRaw.length > maxNaplpsBytes) {
+    if (limit === null) {
+        console.warn('[nap-xtz] no size limit from the backend yet -- encoded without fitting it');
+    } else if (encoder.napRaw.length > limit) {
         // Encoded anyway: the canvas and the Raspberry Pi will take it even
         // though a mint won't, and the wallet says so in its own words.
         console.warn(`[nap-xtz] drawing is ${encoder.napRaw.length} bytes, still over the ` +
-                     `${maxNaplpsBytes} limit -- too much to mint`);
+                     `${limit} limit -- too much to mint`);
     }
 
     // Load into the main canvas
@@ -1381,24 +1398,28 @@ function hideDrawingStatus() {
 
 async function mintDrawing() {
     if (mintInFlight) return; // a held gesture shouldn't stack wallet prompts
-
-    const napRaw = convertToNAPLPS();
-    if (!napRaw) {
-        console.warn('[nap-xtz] nothing to mint - draw something first');
-        showDrawingStatus('Draw something first', true);
-        return;
-    }
-    if (typeof window.mintCurrentNaplps !== 'function') {
-        console.error('[nap-xtz] mintCurrentNaplps not available');
-        showDrawingStatus('Minting unavailable', true);
-        return;
-    }
-
     mintInFlight = true;
-    // A server-signed mint waits on a confirmation (~15s on Shadownet), so this
-    // one stays up rather than timing out halfway through the wait.
-    showDrawingStatus('Minting...', false, 0);
+
     try {
+        // The encoding is fitted to the backend's limit, so have it first --
+        // normally it came when drawing mode opened, and this costs nothing.
+        await loadSizeLimit();
+
+        const napRaw = convertToNAPLPS();
+        if (!napRaw) {
+            console.warn('[nap-xtz] nothing to mint - draw something first');
+            showDrawingStatus('Draw something first', true);
+            return;
+        }
+        if (typeof window.mintCurrentNaplps !== 'function') {
+            console.error('[nap-xtz] mintCurrentNaplps not available');
+            showDrawingStatus('Minting unavailable', true);
+            return;
+        }
+
+        // A server-signed mint waits on a confirmation (~15s on Shadownet), so this
+        // one stays up rather than timing out halfway through the wait.
+        showDrawingStatus('Minting...', false, 0);
         const result = await window.mintCurrentNaplps();
         if (result && result.ok) {
             showDrawingStatus('Minted');

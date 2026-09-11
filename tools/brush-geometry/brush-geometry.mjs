@@ -17,6 +17,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import * as THREE from "three";
+import dotenv from "dotenv";
 
 import { Canvas } from "../thumbnail-maker/raster.mjs";
 import { renderNap } from "../thumbnail-maker/render.mjs";
@@ -25,10 +26,26 @@ import { encodePolys, decodePolys, encoderInFile, maskOf, score, selfIntersectio
 import { CANDIDATES, Stroke, brushReference, makeCamera, project, quads, shipped, widthAxisFor } from "./candidates.mjs";
 import { STROKES, buildStroke, selectStrokes, stressStrokes } from "./strokes.mjs";
 import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from "../../public/js/drawing/tools.js";
+import { readMintLimit } from "../../mint-limit.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_OUT = path.join(here, "out");
 const COLOR = [255, 255, 255];
+
+// The mint limit the server holds drawings to, read with the server's own code
+// (mint-limit.js): TEZOS_MAX_BYTES from the environment, else from the repo's
+// .env (dotenv leaves a variable that is already set alone), else the default.
+// --limit overrides it for a run.
+const setInShell = Boolean(process.env.TEZOS_MAX_BYTES && process.env.TEZOS_MAX_BYTES.trim());
+dotenv.config({ path: path.resolve(here, "../../.env") });
+const mintLimit = readMintLimit();
+const serverLimit = {
+  value: mintLimit.value,   // undefined when the setting won't read -- main() says why
+  error: mintLimit.error,
+  source: mintLimit.fromDefault ? "the server's default"
+        : setInShell ? "TEZOS_MAX_BYTES from the environment"
+        : "TEZOS_MAX_BYTES from .env"
+};
 
 const USAGE = `Usage: brush-geometry <command> [stroke ...] [options]
 
@@ -47,7 +64,8 @@ Options:
   -e, --encoder <mode>   file (default), round, or truncate — rewrites
                          makeNapVector2's quantisation while measuring
   -o, --out <dir>        where sheets and draw write (default: tools/brush-geometry/out)
-  -l, --limit <bytes>    draw: the mint limit to fit under (default: 30000)
+  -l, --limit <bytes>    draw: the mint limit to fit under (default: the server's,
+                         TEZOS_MAX_BYTES — now ${serverLimit.error ? "unreadable" : serverLimit.value}, ${serverLimit.source})
   -t, --tolerance <n>    draw: where the ladder starts (default: tools.js's
                          BRUSH_SIMPLIFY); 0 is the brush that keeps every point
   -s, --strokes <n>      draw: how many strokes to draw (default: 4)
@@ -385,8 +403,9 @@ function sheets(names, { out, encoder }) {
 /* ── draw ──────────────────────────────────────────────────────────────── */
 // Strokes fed through the real Frame API — trimming, refine, the per-stroke
 // z-offset — then exported the way drawing.js's convertToNAPLPS() does it,
-// budget ladder included. `--limit` is what that function reads from
-// GET /api/config; lowering it is how the ladder gets exercised on a drawing
+// budget ladder included. The limit is the one that function reads from
+// GET /api/config -- the server's TEZOS_MAX_BYTES, unless --limit says
+// otherwise, and lowering it is how the ladder gets exercised on a drawing
 // small enough to look at.
 const MAX_SIMPLIFY_PASSES = 5; // convertToNAPLPS() allows itself this many
 
@@ -411,7 +430,7 @@ function drawnStrokes(count) {
   });
 }
 
-function draw({ out, encoder, limit, strokes: strokeCount, tolerance }) {
+function draw({ out, encoder, limit, limitSource, strokes: strokeCount, tolerance }) {
   const camera = makeCamera();
   const worldOrigin = new THREE.Group();
   const frame = new Frame(worldOrigin);
@@ -466,7 +485,7 @@ function draw({ out, encoder, limit, strokes: strokeCount, tolerance }) {
   console.log(`\n${frame.strokes.length} strokes -> ${polys.length} polygons, ${napRaw.length} bytes`);
   const split = polys.filter((p) => p.points.length === 3).length;
   console.log(`decoded ${decoded.length} polygons (${split} split for safety); malformed: ${wrongLength}, outside the frame: ${offFrame}`);
-  console.log(`within the ${limit}-byte limit: ${napRaw.length <= limit ? "yes" : "NO — too much to mint"}`);
+  console.log(`within the ${limit}-byte limit (${limitSource}): ${napRaw.length <= limit ? "yes" : "NO — too much to mint"}`);
 
   fs.mkdirSync(out, { recursive: true });
   const { width, height, pixels } = renderNap(napRaw, { width: 640 });
@@ -607,7 +626,7 @@ function main() {
     options: {
       encoder: { type: "string", short: "e", default: "file" },
       out: { type: "string", short: "o", default: DEFAULT_OUT },
-      limit: { type: "string", short: "l", default: "30000" },
+      limit: { type: "string", short: "l" },   // absent: the server's own figure
       tolerance: { type: "string", short: "t" },
       strokes: { type: "string", short: "s", default: "4" },
       help: { type: "boolean", short: "h", default: false }
@@ -624,10 +643,11 @@ function main() {
     process.exit(2);
   }
 
-  const limit = Number(values.limit);
+  const limitSource = values.limit === undefined ? serverLimit.source : "--limit";
+  const limit = values.limit === undefined ? serverLimit.value : Number(values.limit);
   const strokes = Number(values.strokes);
   if (!Number.isFinite(limit) || limit < 1) {
-    console.error(`Invalid --limit: ${values.limit}`);
+    console.error(values.limit === undefined ? serverLimit.error : `Invalid --limit: ${values.limit}`);
     process.exit(2);
   }
   if (!Number.isInteger(strokes) || strokes < 1) {
@@ -641,7 +661,7 @@ function main() {
     process.exit(2);
   }
 
-  const options = { encoder: values.encoder, out: values.out, limit, strokes, tolerance };
+  const options = { encoder: values.encoder, out: values.out, limit, limitSource, strokes, tolerance };
   try {
     switch (command) {
       case "compare":
