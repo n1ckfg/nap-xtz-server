@@ -63,6 +63,12 @@ async function initTezos() {
         NapClient.onNaplps(function(message) {
             loadTelidonFromText(message.naplps);
             if (message.source === "chain") {
+                // Newer than the newest this page knew of means a fresh mint, one
+                // the watcher has just sent to the Pi as well, and the drawing-mode
+                // cycle starts over from it. With nothing known yet it's the copy
+                // of the latest that comes with connecting, which went to this
+                // page alone.
+                if (_latestTokenId !== null && message.id > _latestTokenId) restartTokenCycle(message.id);
                 noteTokenShown(message.id, message.link); // a new mint becomes the arrow keys' right-hand end
                 setStatus(tokenLink("Token #" + message.id, message.link) + " loaded from chain");
             } else {
@@ -343,4 +349,88 @@ function stepToken(delta) {
     }
 
     loadToken(id);
+}
+
+// ─── Drawing-mode cycle ───────────────────────────────────────────────────────
+// Drawing mode has the screen, so the Pi has nothing of the page's to follow.
+// It reads along the chain instead: one token each slideshow interval, newest
+// first, back to #0, then round to the newest again. index.html starts and
+// stops it with the mode. A new mint puts the count back at the newest -- the
+// watcher has already sent that one to the Pi, so it gets a full interval and
+// the cycle carries on from the token before it.
+//
+// Each tick schedules the next when its reads are done, so a slow one can't
+// stack ticks up, but times it from when it began, so reads don't stretch the
+// interval either. Every start, stop and restart bumps `_cycleRun`, and a tick
+// checks it after each read: one still out when a mint lands must not then put
+// an older drawing over the new one on the Pi.
+let _cycleActive   = false;
+let _cycleInterval = 0;
+let _cycleNextId   = null;   // the next token for the Pi; null for whichever is newest
+let _cycleTimer    = null;
+let _cycleRun      = 0;
+
+// An id with nothing to show (see loadToken) is passed over in the same tick
+// rather than leaving the Pi on one drawing for an extra interval -- up to this
+// many reads, so a long run of them can't fire off a burst.
+const CYCLE_MAX_READS = 5;
+
+function scheduleTokenCycle(delay) {
+    clearTimeout(_cycleTimer);
+    const run = ++_cycleRun;
+    _cycleTimer = setTimeout(function() { cycleToken(run); }, delay);
+}
+
+function startTokenCycle(intervalMs) {
+    _cycleActive   = true;
+    _cycleInterval = intervalMs;
+    _cycleNextId   = null;
+    scheduleTokenCycle(0);
+}
+
+function stopTokenCycle() {
+    _cycleActive = false;
+    clearTimeout(_cycleTimer);
+    _cycleTimer = null;
+    _cycleRun++;
+}
+
+// Token `id` has just gone to the Pi as a new mint.
+function restartTokenCycle(id) {
+    if (!_cycleActive) return;
+    _cycleNextId = id > 0 ? id - 1 : null;
+    scheduleTokenCycle(_cycleInterval);
+}
+
+async function cycleToken(run) {
+    const started = Date.now();
+    try {
+        // Without a Pi there is no one to read the chain for.
+        const config = await NapClient.getConfig();
+        if (run !== _cycleRun || !config.rpiEnabled) return;
+
+        for (let reads = 0; reads < CYCLE_MAX_READS; reads++) {
+            const id = _cycleNextId;
+            let token = null;
+            try {
+                token = await (id === null ? NapClient.getLatest() : NapClient.getToken(id));
+            } catch (e) {
+                if (e.status !== 404) throw e;
+                if (id === null) return;   // nothing minted yet
+            }
+            if (run !== _cycleRun) return;
+
+            const at = token ? token.id : id;
+            _cycleNextId = at > 0 ? at - 1 : null;   // below #0 is round to the newest
+            if (token) {
+                NapClient.sendToRpi(token.naplps, "cycle");
+                return;
+            }
+        }
+    } catch (e) {
+        // A read that failed leaves the count where it was, for the next tick.
+        console.warn("[nap-xtz] token cycle:", e.message || e);
+    } finally {
+        if (run === _cycleRun) scheduleTokenCycle(Math.max(0, _cycleInterval - (Date.now() - started)));
+    }
 }

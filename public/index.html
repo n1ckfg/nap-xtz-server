@@ -806,6 +806,7 @@
 				telidon = [];
 				liveDrawingActive = true; // block slideshow while drawing
 				stopSlideshow();
+				startTokenCycle(slideshow_interval * 1000); // the Pi reads back along the chain meanwhile (js/tezos/tezos.js)
 				setUIHidden(true); // drawing mode always starts clean, however it was left
 				drawingContainer.classList.add('active');
 				await startDrawingMode(drawingContainer);
@@ -813,6 +814,7 @@
 
 			function exitDrawingMode() {
 				stopDrawingMode();
+				stopTokenCycle(); // the Pi stays on whichever token the cycle sent last
 				drawingContainer.classList.remove('active');
 				liveDrawingActive = false;
 				loop(); // refresh the main canvas (handles exit with no strokes drawn)
