@@ -9,6 +9,7 @@ const NapClient = (function() {
 
     let _config = null;
     let _socket = null;
+    let _drawingMode = null;   // { active, interval }, once the page has said
     const _naplpsHandlers = [];
 
     async function api(path, options) {
@@ -76,6 +77,8 @@ const NapClient = (function() {
 
         _socket.on("connect", function() {
             console.log("[nap-client] connected to server");
+            // A restarted server knows nothing of drawing mode, so say it again.
+            if (_drawingMode) _socket.emit("drawing_mode", _drawingMode);
         });
 
         _socket.on("naplps", function(message) {
@@ -129,6 +132,25 @@ const NapClient = (function() {
         }
     }
 
+    // A token for the page to draw, which the backend puts on the Pi as it
+    // hands it over -- one trip for the drawing, not a round trip. `id` is a
+    // token id or "latest".
+    function showToken(id, source) {
+        return api("/api/rpi/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: id, source: source || "client" })
+        });
+    }
+
+    // Drawing mode on or off. While a page is in it the backend runs the Pi's
+    // cycle (rpi-cycle.js) every `intervalMs`. Before the socket is up the
+    // state waits, and goes out on connecting.
+    function setDrawingMode(active, intervalMs) {
+        _drawingMode = { active: !!active, interval: intervalMs };
+        if (_socket && _socket.connected) _socket.emit("drawing_mode", _drawingMode);
+    }
+
     // "take_photo" saves a file on the Pi; "stream_photo" sends one back.
     function rpiCommand(command) {
         if (_socket) {
@@ -153,6 +175,8 @@ const NapClient = (function() {
         onNaplps: onNaplps,
         publish: publish,
         sendToRpi: sendToRpi,
+        showToken: showToken,
+        setDrawingMode: setDrawingMode,
         rpiCommand: rpiCommand
     };
 

@@ -29,7 +29,7 @@
 		<!--<script type="text/javascript" src="./js/libraries/gifjs/gif.js"></script>-->
 		<script type="text/javascript" src="./js/telidon/naplps.js"></script>
 		<script type="text/javascript" src="./js/telidon/TelidonP5.js"></script>
-		<script type="text/javascript" src="https://unpkg.com/@airgap/beacon-dapp@4.3.0/dist/walletbeacon.dapp.min.js"></script>
+		<!-- The Beacon wallet SDK loads on demand: see ensureBeacon() in js/tezos/tezos.js. -->
 		<!-- Backend link: chain reads and NAPLPS messages come from app.js, not from this page. -->
 		<script type="text/javascript" src="/socket.io/socket.io.js"></script>
 		<script type="text/javascript" src="./js/net/client.js"></script>
@@ -324,39 +324,24 @@
 				loadTelidonFromText(field.value); //, false);
 			}
 
-			// One of ./images' .nap files as text, read the way the slideshow always
-			// has: loadStrings drops the line breaks, and the lines go back together
-			// as one string. Drawing mode's cycle reads its local files through here
-			// too, so the Pi gets the same bytes from a file whichever way it's sent.
-			function readNapFile(fileName) {
-			    return new Promise(function(resolve, reject) {
-			        loadStrings(fileName, function(lines) {
-			            let reader = new FileReader();
-			            reader.onload = function(e2) { resolve(e2.target.result); };
-			            reader.onerror = function() { reject(reader.error); };
-			            reader.readAsText(new Blob(lines), 'UTF-8');
-			        }, function() {
-			            reject(new Error("could not load " + fileName));
-			        });
-			    });
-			}
-
 			function loadNewTelidon(fileName) {
-			    readNapFile(fileName).then(function(napRaw) {
+			    loadStrings(fileName, function(response) {
 			        telidon = [];
-			        window.pendingNapRaw = napRaw;
-			        telidon.push(new TelidonDraw([napRaw], sW, sW));
-			        recording = true;
-			        setSize(napRaw.length);
-			        loop(); // new content to animate — restart the draw loop
-			        // While the slideshow runs, every frame we draw also goes
-			        // out to the Raspberry Pi. The backend owns that link, so
-			        // this is a no-op when no Pi is configured.
-			        if (slideshowActive && window.NapClient) {
-			            NapClient.sendToRpi(napRaw, "slideshow");
+			        let reader = new FileReader();
+			        reader.onload = function(e2) {
+			        	window.pendingNapRaw = e2.target.result;
+			            telidon.push(new TelidonDraw([e2.target.result], sW, sW));
+			            recording = true;
+						setSize(e2.target.result.length);
+						loop(); // new content to animate — restart the draw loop
+						// While the slideshow runs, every frame we draw also goes
+						// out to the Raspberry Pi. The backend owns that link, so
+						// this is a no-op when no Pi is configured.
+						if (slideshowActive && window.NapClient) {
+							NapClient.sendToRpi(e2.target.result, "slideshow");
+						}
 			        }
-			    }).catch(function(e) {
-			        console.warn("[nap-xtz] slideshow:", e.message || e);
+			        reader.readAsText(new Blob(response), 'UTF-8');
 			    });
 			}
 
@@ -393,20 +378,10 @@
 			}
 			window.stopSlideshow = stopSlideshow;
 
-			function randomNapPath() {
-			    return "./images/" + napFiles[Math.floor(Math.random() * napFiles.length)];
-			}
-
 			function loadRandomNap() {
 			    if (!napFiles.length) return;
-			    loadNewTelidon(randomNapPath());
-			}
-
-			// The same pick for drawing mode's cycle (js/tezos/tezos.js), which sends it
-			// to the Pi alone: read, not loaded, since this canvas is behind the overlay.
-			function readRandomNap() {
-			    if (!napFiles.length) return Promise.reject(new Error("no slideshow files"));
-			    return readNapFile(randomNapPath());
+			    const file = napFiles[Math.floor(Math.random() * napFiles.length)];
+			    loadNewTelidon("./images/" + file);
 			}
 
 			//function setPreview(name) {
@@ -831,7 +806,7 @@
 				telidon = [];
 				liveDrawingActive = true; // block slideshow while drawing
 				stopSlideshow();
-				startRpiCycle(slideshow_interval * 1000, readRandomNap); // meanwhile the Pi takes turns: chain tokens, local files (js/tezos/tezos.js)
+				NapClient.setDrawingMode(true, slideshow_interval * 1000); // meanwhile the backend cycles the Pi (rpi-cycle.js)
 				setUIHidden(true); // drawing mode always starts clean, however it was left
 				drawingContainer.classList.add('active');
 				await startDrawingMode(drawingContainer);
@@ -839,7 +814,7 @@
 
 			function exitDrawingMode() {
 				stopDrawingMode();
-				stopRpiCycle(); // the Pi stays on whichever drawing the cycle sent last
+				NapClient.setDrawingMode(false); // the Pi stays on whichever drawing the cycle sent last
 				drawingContainer.classList.remove('active');
 				liveDrawingActive = false;
 				loop(); // refresh the main canvas (handles exit with no strokes drawn)

@@ -3,8 +3,10 @@
 // ─── Wallet shim ──────────────────────────────────────────────────────────────
 // The one piece of the Tezos flow that can't move to the backend: a wallet key
 // belongs to the user, so signing happens here. Everything else -- contract
-// address, network endpoints, hex encoding, Michelson, chain reads -- lives in
-// app.js and reaches this page through NapClient (js/net/client.js).
+// address, network endpoints, hex encoding, Michelson, chain reads, what the
+// Pi shows -- lives in app.js and reaches this page through NapClient
+// (js/net/client.js). Even the wallet SDK stays out of the way until a wallet
+// is wanted (see ensureBeacon).
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let _beaconClient  = null;
@@ -61,14 +63,12 @@ async function initTezos() {
         // POSTs to /api/naplps) render as soon as they arrive.
         NapClient.connect();
         NapClient.onNaplps(function(message) {
-            loadTelidonFromText(message.naplps);
+            // Behind the drawing overlay the canvas can't be seen, and leaving
+            // drawing mode puts the newest token on it anyway -- so a drawing
+            // arriving meanwhile isn't drawn, or p5 would run the reveal and the
+            // VHSC pass under the overlay for nothing.
+            if (!liveDrawingActive) loadTelidonFromText(message.naplps);
             if (message.source === "chain") {
-                // Newer than the newest this page knew of means a fresh mint, one
-                // the watcher has just sent to the Pi as well, and the drawing-mode
-                // cycle starts over from it. With nothing known yet it's the copy
-                // of the latest that comes with connecting, which went to this
-                // page alone.
-                if (_latestTokenId !== null && message.id > _latestTokenId) restartRpiCycle(message.id);
                 noteTokenShown(message.id, message.link); // a new mint becomes the arrow keys' right-hand end
                 setStatus(tokenLink("Token #" + message.id, message.link) + " loaded from chain");
             } else {
@@ -76,59 +76,107 @@ async function initTezos() {
             }
         });
 
-        // Support multiple possible UMD global names for the Beacon SDK bundle.
-        const SDK = window.BeaconDapp || window.beaconDapp || window.beacon;
-        if (!SDK || !SDK.DAppClient) {
-            console.warn("Beacon SDK not detected — wallet features disabled.");
-            setStatus("Wallet SDK unavailable", true);
-            return;
+        // A wallet session stored by an earlier visit comes back at once; with
+        // none, the SDK waits until a wallet is wanted (see ensureBeacon).
+        if (hasStoredWallet()) {
+            ensureBeacon().catch(function(e) {
+                console.warn("[nap-xtz] wallet SDK:", e.message || e);
+                setStatus("Wallet SDK unavailable", true);
+            });
         }
-
-        // Beacon SDK v4+: network must be declared at construction time.
-        // Shadownet is a custom network; the RPC URL comes from the server.
-        _beaconClient = new SDK.DAppClient({
-            name: "NAP-XTZ",
-            network: { type: "custom", name: _config.network, rpcUrl: _config.rpcUrl },
-            // Disable deprecated P2P matrix relay (papers.tech servers are offline).
-            enableMetrics: false,
-            featuresConfig: {
-                network: {
-                    // Skip P2P pairing entirely - use only WalletConnect/extensions.
-                    enableP2P: false
-                }
-            }
-        });
-
-        // Beacon SDK v4+ requires an explicit subscriber for ACTIVE_ACCOUNT_SET
-        // to avoid "no active subscription" warnings on every account change.
-        if (SDK.BeaconEvent && _beaconClient.subscribeToEvent) {
-            await _beaconClient.subscribeToEvent(
-                SDK.BeaconEvent.ACTIVE_ACCOUNT_SET,
-                (account) => {
-                    _activeAccount = account || null;
-                    updateWalletUI();
-                }
-            );
-        }
-
-        // Restore an existing wallet session on page load.
-        const existing = await _beaconClient.getActiveAccount();
-        if (existing) {
-            _activeAccount = existing;
-            updateWalletUI();
-        }
-
     } catch (e) {
         console.error("initTezos:", e);
         setStatus("Tezos init error: " + e.message, true);
     }
 }
 
+// ─── Wallet SDK ───────────────────────────────────────────────────────────────
+// The Beacon SDK is 2.4 MB of script (665 KB over the wire) and sets up storage
+// and wallet transports as it starts -- all of it for signing, which a page
+// whose mints the server signs never does. So it isn't in index.html: it loads
+// the first time a wallet is wanted (Connect Wallet, or a mint with no server
+// key), or at once when this browser has a session stored from before, so that
+// session comes back as it always has.
+const BEACON_SDK_URL = "https://unpkg.com/@airgap/beacon-dapp@4.3.0/dist/walletbeacon.dapp.min.js";
+let _beaconLoading = null;   // the one load, shared by everything that asks
+
+// Beacon keeps the connected account under this key in localStorage.
+function hasStoredWallet() {
+    try { return !!localStorage.getItem("beacon:active-account"); } catch (e) { return false; }
+}
+
+// Resolves to the DAppClient, loading the SDK the first time. A load that
+// fails is forgotten, so the next click tries again.
+function ensureBeacon() {
+    if (!_beaconLoading) {
+        _beaconLoading = loadBeacon().catch(function(e) {
+            _beaconLoading = null;
+            throw e;
+        });
+    }
+    return _beaconLoading;
+}
+
+function loadScript(src) {
+    return new Promise(function(resolve, reject) {
+        const script = document.createElement("script");
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = function() { reject(new Error("could not load " + src)); };
+        document.head.appendChild(script);
+    });
+}
+
+async function loadBeacon() {
+    await loadScript(BEACON_SDK_URL);
+
+    // Support multiple possible UMD global names for the Beacon SDK bundle.
+    const SDK = window.BeaconDapp || window.beaconDapp || window.beacon;
+    if (!SDK || !SDK.DAppClient) throw new Error("Beacon SDK not detected");
+    if (!_config) _config = await NapClient.getConfig();
+
+    // Beacon SDK v4+: network must be declared at construction time.
+    // Shadownet is a custom network; the RPC URL comes from the server.
+    _beaconClient = new SDK.DAppClient({
+        name: "NAP-XTZ",
+        network: { type: "custom", name: _config.network, rpcUrl: _config.rpcUrl },
+        // Disable deprecated P2P matrix relay (papers.tech servers are offline).
+        enableMetrics: false,
+        featuresConfig: {
+            network: {
+                // Skip P2P pairing entirely - use only WalletConnect/extensions.
+                enableP2P: false
+            }
+        }
+    });
+
+    // Beacon SDK v4+ requires an explicit subscriber for ACTIVE_ACCOUNT_SET
+    // to avoid "no active subscription" warnings on every account change.
+    if (SDK.BeaconEvent && _beaconClient.subscribeToEvent) {
+        await _beaconClient.subscribeToEvent(
+            SDK.BeaconEvent.ACTIVE_ACCOUNT_SET,
+            (account) => {
+                _activeAccount = account || null;
+                updateWalletUI();
+            }
+        );
+    }
+
+    // Restore an existing wallet session.
+    const existing = await _beaconClient.getActiveAccount();
+    if (existing) {
+        _activeAccount = existing;
+        updateWalletUI();
+    }
+
+    return _beaconClient;
+}
+
 // ─── Wallet connection ────────────────────────────────────────────────────────
 async function connectWallet() {
-    if (!_beaconClient) { setStatus("SDK not ready", true); return; }
     try {
         setStatus("Opening wallet...");
+        await ensureBeacon();
         console.log("[nap-xtz] requestPermissions...");
         // Network was set at DAppClient construction — do not pass it here.
         await _beaconClient.requestPermissions();
@@ -249,9 +297,9 @@ async function serverMint(napRaw) {
 // A request to the backend, which owns the TzKT queries and the byte decoding.
 //
 // `toRpi` is the "latest" link's doing: clicking it puts the drawing on the Pi
-// as well as this canvas, the way slideshow frames go out. The automatic load
-// when the page opens leaves the Pi alone -- reloading a browser is not a
-// decision to change what the Pi is showing.
+// as well as this canvas, the backend sending it there as it hands it over. The
+// automatic load when the page opens leaves the Pi alone -- reloading a browser
+// is not a decision to change what the Pi is showing.
 //
 // Two ids say where the arrow keys are. `_currentTokenId` is the token on the
 // canvas and stays null until one has arrived from the chain -- which is what
@@ -286,10 +334,9 @@ function tokenLink(text, link) {
 async function loadLatestToken(toRpi) {
     try {
         setStatus("Loading latest token from chain...");
-        const token = await NapClient.getLatest();
+        const token = toRpi ? await NapClient.showToken("latest", "latest") : await NapClient.getLatest();
         console.log("[nap-xtz] loaded from chain, NAPLPS length:", token.naplps.length);
         loadTelidonFromText(token.naplps);
-        if (toRpi) NapClient.sendToRpi(token.naplps, "latest");
         noteTokenShown(token.id, token.link);
 
         setStatus(tokenLink("Latest token", token.link) + " loaded from chain");
@@ -307,10 +354,9 @@ async function loadToken(id) {
     _tokenLoading = true;
     try {
         setStatus("Loading token #" + id + " from chain...");
-        const token = await NapClient.getToken(id);
+        const token = await NapClient.showToken(id, "browse");   // onto the Pi on the way
         console.log("[nap-xtz] loaded token #" + id + ", NAPLPS length:", token.naplps.length);
         loadTelidonFromText(token.naplps);
-        NapClient.sendToRpi(token.naplps, "browse");
         noteTokenShown(token.id, token.link);
 
         setStatus(tokenLink("Token #" + token.id, token.link) + " loaded from chain");
@@ -349,110 +395,4 @@ function stepToken(delta) {
     }
 
     loadToken(id);
-}
-
-// ─── Drawing-mode cycle ───────────────────────────────────────────────────────
-// Drawing mode has the screen, so the Pi has nothing of the page's to follow.
-// It gets a drawing each slideshow interval instead, taking turns: a token
-// from the chain, then one of the slideshow's local files at random, then the
-// next token. The tokens go newest first, back to #0, then round to the newest
-// again. index.html starts and stops the cycle with the mode, and hands it the
-// slideshow's picker, the file list being the page's business. A new mint puts
-// the count back at the newest -- the watcher has already sent that one to the
-// Pi, so it counts as the chain's turn: a full interval, then a local file,
-// then the token before it.
-//
-// Each tick schedules the next when its reads are done, so a slow one can't
-// stack ticks up, but times it from when it began, so reads don't stretch the
-// interval either. Every start, stop and restart bumps `_cycleRun`, and a tick
-// checks it after each read: one still out when a mint lands must not then put
-// an older drawing over the new one on the Pi.
-let _cycleActive    = false;
-let _cycleInterval  = 0;
-let _cyclePickLocal = null;   // index.html's: resolves to a random local file's NAPLPS
-let _cycleLocalTurn = false;  // whose turn is next: a local file's, or the chain's
-let _cycleNextId    = null;   // the chain's next token; null for whichever is newest
-let _cycleTimer     = null;
-let _cycleRun       = 0;
-
-// An id with nothing to show (see loadToken) is passed over in the same tick
-// rather than leaving the Pi on one drawing for an extra interval -- up to this
-// many reads, so a long run of them can't fire off a burst.
-const CYCLE_MAX_READS = 5;
-
-function scheduleRpiCycle(delay) {
-    clearTimeout(_cycleTimer);
-    const run = ++_cycleRun;
-    _cycleTimer = setTimeout(function() { rpiCycleTick(run); }, delay);
-}
-
-function startRpiCycle(intervalMs, pickLocal) {
-    _cycleActive    = true;
-    _cycleInterval  = intervalMs;
-    _cyclePickLocal = pickLocal;
-    _cycleLocalTurn = false;   // the newest token goes first
-    _cycleNextId    = null;
-    scheduleRpiCycle(0);
-}
-
-function stopRpiCycle() {
-    _cycleActive = false;
-    clearTimeout(_cycleTimer);
-    _cycleTimer = null;
-    _cycleRun++;
-}
-
-// Token `id` has just gone to the Pi as a new mint, which was the chain's turn.
-function restartRpiCycle(id) {
-    if (!_cycleActive) return;
-    _cycleLocalTurn = true;
-    _cycleNextId    = id > 0 ? id - 1 : null;
-    scheduleRpiCycle(_cycleInterval);
-}
-
-async function rpiCycleTick(run) {
-    const started = Date.now();
-
-    // The turn passes on whatever this one comes to, so a chain that can't be
-    // read or a file that won't load costs only its own slot.
-    const localTurn = _cycleLocalTurn;
-    _cycleLocalTurn = !localTurn;
-
-    try {
-        // Without a Pi there is no one to read any of it for.
-        const config = await NapClient.getConfig();
-        if (run !== _cycleRun || !config.rpiEnabled) return;
-
-        if (localTurn) {
-            const napRaw = await _cyclePickLocal();
-            if (run !== _cycleRun) return;
-            NapClient.sendToRpi(napRaw, "cycle-local");
-            return;
-        }
-
-        for (let reads = 0; reads < CYCLE_MAX_READS; reads++) {
-            const id = _cycleNextId;
-            let token = null;
-            try {
-                token = await (id === null ? NapClient.getLatest() : NapClient.getToken(id));
-            } catch (e) {
-                if (e.status !== 404) throw e;
-                if (id === null) return;   // nothing minted yet
-            }
-            if (run !== _cycleRun) return;
-
-            const at = token ? token.id : id;
-            _cycleNextId = at > 0 ? at - 1 : null;   // below #0 is round to the newest
-            if (token) {
-                NapClient.sendToRpi(token.naplps, "cycle-chain");
-                return;
-            }
-        }
-    } catch (e) {
-        // A token that failed to read leaves the count where it was, for the
-        // chain's next turn.
-        console.warn("[nap-xtz] Pi cycle:", e.message || e);
-    } finally {
-        if (run === _cycleRun) scheduleRpiCycle(Math.max(0, _cycleInterval - (Date.now() - started)));
-    }
 }

@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const bodyParser = require("body-parser");
 
 const fs = require("fs");
+const path = require("path");
 const dotenv = require("dotenv").config();
 
 // DEBUG arrives from the environment as a string, so "false" is still truthy.
@@ -132,8 +133,18 @@ async function readNextTokenId() {
     return isNaN(nextId) ? 0 : nextId;
 }
 
+// Minted tokens never change -- the contract writes token_metadata only when it
+// mints -- so each is read from TzKT once and kept. The Pi's cycle comes round
+// to every token again and again, and the arrow keys revisit them too. An id
+// minted without a drawing is kept as null; an id not minted yet isn't kept at
+// all, since the next read may find it.
+const TOKEN_CACHE_MAX = 500;
+const tokenCache = new Map();   // id -> token, or null for one with no drawing
+
 // Reads one token's NAPLPS bytes out of the token_metadata bigmap.
 async function readToken(id) {
+    if (tokenCache.has(id)) return tokenCache.get(id);
+
     const entry = await tzktFetch(
         "/contracts/" + TEZOS.contract + "/bigmaps/token_metadata/keys/" + id
     );
@@ -141,16 +152,20 @@ async function readToken(id) {
     if (!entry) return null;
 
     const hexNaplps = entry.value && entry.value.token_info && entry.value.token_info.naplps;
-    if (!hexNaplps) {
+    let token = null;
+    if (hexNaplps) {
+        token = {
+            id: id,
+            naplps: hexToString(hexNaplps),
+            link: TEZOS.explorerBase + "/" + TEZOS.contract + "/operations/"
+        };
+    } else {
         console.warn("[tezos] token " + id + " has no 'naplps' key in token_info");
-        return null;
     }
 
-    return {
-        id: id,
-        naplps: hexToString(hexNaplps),
-        link: TEZOS.explorerBase + "/" + TEZOS.contract + "/operations/"
-    };
+    tokenCache.set(id, token);
+    if (tokenCache.size > TOKEN_CACHE_MAX) tokenCache.delete(tokenCache.keys().next().value);
+    return token;
 }
 
 async function readLatestToken() {
@@ -242,6 +257,16 @@ let latestToken = null;   // last token read, served to clients on connect
 let lastSeenId = -1;
 let pollTimer = null;
 
+// The newest drawing: the watcher's, unless it has none yet or `refresh` asks
+// for a fresh read.
+async function getLatestToken(refresh) {
+    if (!latestToken || refresh) {
+        const token = await readLatestToken();
+        if (token) latestToken = token;
+    }
+    return latestToken;
+}
+
 async function pollChain() {
     try {
         const nextId = await readNextTokenId();
@@ -271,6 +296,10 @@ async function pollChain() {
             // it. A minted drawing goes out over the link this server holds,
             // the same way the slideshow's frames do.
             sendNaplpsToRpi(token.naplps, "chain");
+
+            // If a page is drawing, that was the Pi cycle's chain turn, and the
+            // count starts over from this token (see rpi-cycle.js).
+            rpiCycle.minted(token.id);
         }
         lastSeenId = latestId;
     } catch (e) {
@@ -588,6 +617,58 @@ function sendCommandToRpi(command) {
     return sent > 0;
 }
 
+// ─── Drawing-mode cycle ───────────────────────────────────────────────────────
+// While a page is in drawing mode the Pi takes turns between chain tokens and
+// the slideshow's local files -- rpi-cycle.js has the order. It runs here,
+// where the chain reads and the files already are; the page only says when
+// drawing mode starts and stops.
+const { RpiCycle } = require("./rpi-cycle");
+
+const IMAGES_DIR = path.join(__dirname, "public", "images");
+
+// The slideshow's own list (the page reads the same nap-list.json), or every
+// .nap in the folder if the list won't read.
+async function slideshowFiles() {
+    try {
+        const list = JSON.parse(await fs.promises.readFile(path.join(IMAGES_DIR, "nap-list.json"), "utf8"));
+        if (Array.isArray(list) && list.length) return list;
+    } catch (e) { /* the folder, then */ }
+    return (await fs.promises.readdir(IMAGES_DIR)).filter(function(name) { return name.endsWith(".nap"); });
+}
+
+// One at random. The page's loadStrings() drops a file's line breaks, so this
+// does too, and a file looks the same on the Pi whichever side sent it.
+async function readRandomSlideshowFile() {
+    const files = await slideshowFiles();
+    if (!files.length) throw new Error("no slideshow files in " + IMAGES_DIR);
+    const name = path.basename(files[Math.floor(Math.random() * files.length)]);
+    const text = await fs.promises.readFile(path.join(IMAGES_DIR, name), "latin1");
+    return text.replace(/[\r\n]/g, "");
+}
+
+const rpiCycle = new RpiCycle({
+    readToken: readToken,
+    // The watcher's newest id, or the chain's own count before its first poll.
+    newestId: async function() {
+        return lastSeenId >= 0 ? lastSeenId : (await readNextTokenId()) - 1;
+    },
+    readLocal: readRandomSlideshowFile,
+    send: sendNaplpsToRpi,
+    canSend: anyRpiConnected,
+    onError: function(e) { console.warn("[rpi] cycle: " + e.message); }
+});
+
+// A page entering or leaving drawing mode -- or going away, which is leaving too.
+function setDrawingMode(socket, active, interval) {
+    const wasRunning = rpiCycle.running;
+    rpiCycle.setClient(socket.id, active, interval);
+    if (rpiCycle.running && !wasRunning) {
+        console.log("[rpi] drawing mode: cycling every " + (rpiCycle.interval / 1000) + "s");
+    } else if (!rpiCycle.running && wasRunning) {
+        console.log("[rpi] drawing mode over: cycle stopped");
+    }
+}
+
 // ~ ~ ~ ~
 
 app.use(express.static("public"));
@@ -657,12 +738,9 @@ app.get("/api/health", function(req, res) {
 // Latest minted drawing. Served from cache unless ?refresh=1.
 app.get("/api/tezos/latest", async function(req, res) {
     try {
-        if (!latestToken || req.query.refresh) {
-            const token = await readLatestToken();
-            if (token) latestToken = token;
-        }
-        if (!latestToken) return res.status(404).json({ error: "No tokens on chain yet" });
-        res.json(latestToken);
+        const token = await getLatestToken(req.query.refresh);
+        if (!token) return res.status(404).json({ error: "No tokens on chain yet" });
+        res.json(token);
     } catch (e) {
         console.warn("[tezos] /api/tezos/latest: " + e.message);
         res.status(502).json({ error: e.message });
@@ -769,7 +847,9 @@ app.get("/api/rpi/status", function(req, res) {
         pis: rpis.map(function(rpi) {
             return { host: rpi.host, url: rpi.url, connected: rpi.connected };
         }),
-        naplpsFormat: RPI.naplpsFormat
+        naplpsFormat: RPI.naplpsFormat,
+        // The drawing-mode cycle (rpi-cycle.js): whether any page is drawing.
+        cycle: { running: rpiCycle.running, drawingPages: rpiCycle.clients.size, interval: rpiCycle.interval }
     });
 });
 
@@ -798,6 +878,31 @@ app.post("/api/rpi/command", function(req, res) {
     res.json({ ok: true, sent: sendCommandToRpi(command) });
 });
 
+// A token for the page to draw, put on the Pi as it goes -- what the "latest"
+// link and the arrow keys ask for. `id` is a token id or "latest". The drawing
+// only travels outward: the page used to fetch it and send it straight back.
+// With no Pi configured the page still gets its token, and `sent` says false.
+app.post("/api/rpi/token", async function(req, res) {
+    const which = req.body && req.body.id;
+    const source = (req.body && req.body.source) || "api";
+
+    try {
+        let token;
+        if (which === "latest") {
+            token = await getLatestToken();
+            if (!token) return res.status(404).json({ error: "No tokens on chain yet" });
+        } else {
+            const id = parseInt(which, 10);
+            if (isNaN(id) || id < 0) return res.status(400).json({ error: "Bad token id" });
+            token = await readToken(id);
+            if (!token) return res.status(404).json({ error: "Token " + id + " not found" });
+        }
+        res.json(Object.assign({ sent: sendNaplpsToRpi(token.naplps, source) }, token));
+    } catch (e) {
+        res.status(502).json({ error: e.message });
+    }
+});
+
 // ~ ~ ~ ~
 
 if (secure) {
@@ -817,6 +922,7 @@ io.on("connection", function(socket) {
     //~
     socket.on("disconnect", function(event) {
         console.log("A socket.io user disconnected.");
+        setDrawingMode(socket, false);
     });
     //~
     // Hand the newcomer whatever is current so it has something to draw.
@@ -856,6 +962,12 @@ io.on("connection", function(socket) {
     // Let clients drive the Pi's camera.
     socket.on("rpi_command", function(data) {
         sendCommandToRpi(typeof data === "string" ? data : (data && data.command));
+    });
+    //~
+    // A page entering or leaving drawing mode. While any page is in it the Pi
+    // runs its cycle, at the slideshow interval the page sends along.
+    socket.on("drawing_mode", function(data) {
+        setDrawingMode(socket, !!(data && data.active), data && data.interval);
     });
 });
 
