@@ -74,6 +74,44 @@
 
 			let isMobile = false;
 
+		// ── VHSC post-processing shader (blur → sharpen → posterize) ──
+		// A WEBGL graphics buffer runs the shader; the main canvas stays 2D so
+		// all existing TelidonDraw code works unchanged.
+		let vhscGfx = null;   // p5.Graphics (WEBGL)
+		let vhscShader = null;
+
+		const VHSC_VERT = `
+		precision highp float;
+		attribute vec3 aPosition;
+		attribute vec2 aTexCoord;
+		varying vec2 vTexCoord;
+		void main() {
+		  vTexCoord = aTexCoord;
+		  vec4 positionVec4 = vec4(aPosition, 1.0);
+		  positionVec4.xy = positionVec4.xy * 2.0 - 1.0;
+		  gl_Position = positionVec4;
+		}
+		`;
+
+		const VHSC_FRAG = `
+		precision highp float;
+		varying vec2 vTexCoord;
+		uniform sampler2D tex0;
+		uniform float gamma;
+		uniform float posterizeLevels;
+		uniform vec2 texelSize;
+		void main() {
+		  vec3 centerColor = texture2D(tex0, vTexCoord).rgb;
+		  vec3 leftColor = texture2D(tex0, vTexCoord - vec2(texelSize.x, 0.0)).rgb;
+		  vec3 rightColor = texture2D(tex0, vTexCoord + vec2(texelSize.x, 0.0)).rgb;
+		  vec3 topColor = texture2D(tex0, vTexCoord + vec2(0.0, texelSize.y)).rgb;
+		  vec3 bottomColor = texture2D(tex0, vTexCoord - vec2(0.0, texelSize.y)).rgb;
+		  vec3 blurredColor = topColor * 0.10 + leftColor * 0.20 + centerColor * 0.40 + rightColor * 0.20 + bottomColor * 0.10;
+		  vec3 sharpenedColor = blurredColor * 5.0 - (leftColor + rightColor + topColor + bottomColor);
+		  vec3 posterizedColor = floor(sharpenedColor * posterizeLevels) / posterizeLevels;
+		  gl_FragColor = vec4(posterizedColor, 1.0);
+		}
+		`;
 
 			function preload() {
 			    isMobile = detectMobile();
@@ -94,6 +132,13 @@
 				// (2+) would draw this large canvas at 4x the pixels for little
 				// visible gain on the retro vector art. (grid/js/main.js does the same.)
 				pixelDensity(1);
+
+			    // VHSC post-processing: a WEBGL graphics buffer the same size as the
+			    // canvas, used only to run the shader over a snapshot of the main
+			    // 2D canvas each frame.
+			    vhscGfx = createGraphics(sW * scaleFactor, sH * scaleFactor, WEBGL);
+			    vhscGfx.pixelDensity(1);
+			    vhscShader = vhscGfx.createShader(VHSC_VERT, VHSC_FRAG);
 
 			    //if (!isMobile) setupGif();
 
@@ -163,6 +208,16 @@
 			        textAlign(CENTER);
 			        text("\\\\ DRAG ' n ' DROP //", width/2, height/2);
 			        textAlign(LEFT);
+			        // Apply VHSC even on the placeholder so the look is consistent.
+			        if (vhscGfx && vhscShader) {
+			            vhscGfx.shader(vhscShader);
+			            vhscShader.setUniform('tex0', c);
+			            vhscShader.setUniform('gamma', 1.2);
+			            vhscShader.setUniform('posterizeLevels', 90.0);
+			            vhscShader.setUniform('texelSize', [0.008, 0.008 * 1.375]);
+			            vhscGfx.rect(0, 0, vhscGfx.width, vhscGfx.height);
+			            image(vhscGfx, 0, 0, width, height);
+			        }
 			        noLoop(); // idle placeholder is static; stop redrawing
 			        return;
 			    }
@@ -178,6 +233,20 @@
 					if (!telidon[i].finished) allFinished = false;
 				}
 			    pop();
+
+			    // ── VHSC post-processing pass ──
+			    // Run the main canvas through the blur→sharpen→posterize shader,
+			    // then stamp the result back. The WEBGL buffer is the same size as
+			    // the canvas, so the image() call is a 1:1 blit.
+			    if (vhscGfx && vhscShader) {
+			        vhscGfx.shader(vhscShader);
+			        vhscShader.setUniform('tex0', c);
+			        vhscShader.setUniform('gamma', 1.2);
+			        vhscShader.setUniform('posterizeLevels', 90.0);
+			        vhscShader.setUniform('texelSize', [0.008, 0.008 * 1.375]);
+			        vhscGfx.rect(0, 0, vhscGfx.width, vhscGfx.height);
+			        image(vhscGfx, 0, 0, width, height);
+			    }
 
 			    // Once every drawing has fully revealed, the frame is static —
 			    // stop the loop until new content arrives (see loop() calls below).
@@ -198,6 +267,11 @@
 			function windowResized() {
 			    scaleFactor = Math.min(windowWidth / sW, windowHeight / sH);
 			    resizeCanvas(sW * scaleFactor, sH * scaleFactor);
+			    // Rebuild the VHSC post-processing buffer at the new size.
+			    if (vhscGfx) vhscGfx.remove();
+			    vhscGfx = createGraphics(sW * scaleFactor, sH * scaleFactor, WEBGL);
+			    vhscGfx.pixelDensity(1);
+			    vhscShader = vhscGfx.createShader(VHSC_VERT, VHSC_FRAG);
 			    loop(); // redraw at the new size (re-idles once finished)
 			}
 

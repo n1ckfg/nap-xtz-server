@@ -4,6 +4,7 @@ import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
 import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
 import { Palette } from './palette.js';
+import { createVHSCPass } from '../shaders/vhsc-three.js';
 
 let gestureRecognizer;
 let video;
@@ -20,6 +21,7 @@ let labelsContainer;
 let worldNode;
 let worldScale;
 let frame;
+let vhscPass = null;
 
 const MAX_HANDS = 2;
 
@@ -163,6 +165,13 @@ function initThreeJS() {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.setSize(size.w, size.h);
     // Don't append here - startDrawingMode will handle it
+
+    // VHSC post-processing: render the scene into a texture, then draw it to
+    // the screen through the blur→sharpen→posterize chain.
+    vhscPass = createVHSCPass(
+        Math.round(size.w * Math.min(window.devicePixelRatio, 1.5)),
+        Math.round(size.h * Math.min(window.devicePixelRatio, 1.5))
+    );
 
     // Add some lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
@@ -339,6 +348,12 @@ function onWindowResize() {
     camera.aspect = DRAW_ASPECT;
     camera.updateProjectionMatrix();
     renderer.setSize(size.w, size.h);
+    if (vhscPass) {
+        vhscPass.renderTarget.setSize(
+            Math.round(size.w * Math.min(window.devicePixelRatio, 1.5)),
+            Math.round(size.h * Math.min(window.devicePixelRatio, 1.5))
+        );
+    }
 }
 
 // Keyboard handlers
@@ -1070,7 +1085,15 @@ function animateLoop() {
         }
     }
 
-    renderer.render(scene, camera);
+    // Two-pass render: scene → offscreen target, then VHSC shader → screen.
+    if (vhscPass) {
+        renderer.setRenderTarget(vhscPass.renderTarget);
+        renderer.render(scene, camera);
+        renderer.setRenderTarget(null);
+        renderer.render(vhscPass.orthoScene, vhscPass.orthoCamera);
+    } else {
+        renderer.render(scene, camera);
+    }
 }
 
 // Export functions for external control
