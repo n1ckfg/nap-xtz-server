@@ -68,7 +68,7 @@ async function initTezos() {
                 // cycle starts over from it. With nothing known yet it's the copy
                 // of the latest that comes with connecting, which went to this
                 // page alone.
-                if (_latestTokenId !== null && message.id > _latestTokenId) restartTokenCycle(message.id);
+                if (_latestTokenId !== null && message.id > _latestTokenId) restartRpiCycle(message.id);
                 noteTokenShown(message.id, message.link); // a new mint becomes the arrow keys' right-hand end
                 setStatus(tokenLink("Token #" + message.id, message.link) + " loaded from chain");
             } else {
@@ -353,61 +353,82 @@ function stepToken(delta) {
 
 // ─── Drawing-mode cycle ───────────────────────────────────────────────────────
 // Drawing mode has the screen, so the Pi has nothing of the page's to follow.
-// It reads along the chain instead: one token each slideshow interval, newest
-// first, back to #0, then round to the newest again. index.html starts and
-// stops it with the mode. A new mint puts the count back at the newest -- the
-// watcher has already sent that one to the Pi, so it gets a full interval and
-// the cycle carries on from the token before it.
+// It gets a drawing each slideshow interval instead, taking turns: a token
+// from the chain, then one of the slideshow's local files at random, then the
+// next token. The tokens go newest first, back to #0, then round to the newest
+// again. index.html starts and stops the cycle with the mode, and hands it the
+// slideshow's picker, the file list being the page's business. A new mint puts
+// the count back at the newest -- the watcher has already sent that one to the
+// Pi, so it counts as the chain's turn: a full interval, then a local file,
+// then the token before it.
 //
 // Each tick schedules the next when its reads are done, so a slow one can't
 // stack ticks up, but times it from when it began, so reads don't stretch the
 // interval either. Every start, stop and restart bumps `_cycleRun`, and a tick
 // checks it after each read: one still out when a mint lands must not then put
 // an older drawing over the new one on the Pi.
-let _cycleActive   = false;
-let _cycleInterval = 0;
-let _cycleNextId   = null;   // the next token for the Pi; null for whichever is newest
-let _cycleTimer    = null;
-let _cycleRun      = 0;
+let _cycleActive    = false;
+let _cycleInterval  = 0;
+let _cyclePickLocal = null;   // index.html's: resolves to a random local file's NAPLPS
+let _cycleLocalTurn = false;  // whose turn is next: a local file's, or the chain's
+let _cycleNextId    = null;   // the chain's next token; null for whichever is newest
+let _cycleTimer     = null;
+let _cycleRun       = 0;
 
 // An id with nothing to show (see loadToken) is passed over in the same tick
 // rather than leaving the Pi on one drawing for an extra interval -- up to this
 // many reads, so a long run of them can't fire off a burst.
 const CYCLE_MAX_READS = 5;
 
-function scheduleTokenCycle(delay) {
+function scheduleRpiCycle(delay) {
     clearTimeout(_cycleTimer);
     const run = ++_cycleRun;
-    _cycleTimer = setTimeout(function() { cycleToken(run); }, delay);
+    _cycleTimer = setTimeout(function() { rpiCycleTick(run); }, delay);
 }
 
-function startTokenCycle(intervalMs) {
-    _cycleActive   = true;
-    _cycleInterval = intervalMs;
-    _cycleNextId   = null;
-    scheduleTokenCycle(0);
+function startRpiCycle(intervalMs, pickLocal) {
+    _cycleActive    = true;
+    _cycleInterval  = intervalMs;
+    _cyclePickLocal = pickLocal;
+    _cycleLocalTurn = false;   // the newest token goes first
+    _cycleNextId    = null;
+    scheduleRpiCycle(0);
 }
 
-function stopTokenCycle() {
+function stopRpiCycle() {
     _cycleActive = false;
     clearTimeout(_cycleTimer);
     _cycleTimer = null;
     _cycleRun++;
 }
 
-// Token `id` has just gone to the Pi as a new mint.
-function restartTokenCycle(id) {
+// Token `id` has just gone to the Pi as a new mint, which was the chain's turn.
+function restartRpiCycle(id) {
     if (!_cycleActive) return;
-    _cycleNextId = id > 0 ? id - 1 : null;
-    scheduleTokenCycle(_cycleInterval);
+    _cycleLocalTurn = true;
+    _cycleNextId    = id > 0 ? id - 1 : null;
+    scheduleRpiCycle(_cycleInterval);
 }
 
-async function cycleToken(run) {
+async function rpiCycleTick(run) {
     const started = Date.now();
+
+    // The turn passes on whatever this one comes to, so a chain that can't be
+    // read or a file that won't load costs only its own slot.
+    const localTurn = _cycleLocalTurn;
+    _cycleLocalTurn = !localTurn;
+
     try {
-        // Without a Pi there is no one to read the chain for.
+        // Without a Pi there is no one to read any of it for.
         const config = await NapClient.getConfig();
         if (run !== _cycleRun || !config.rpiEnabled) return;
+
+        if (localTurn) {
+            const napRaw = await _cyclePickLocal();
+            if (run !== _cycleRun) return;
+            NapClient.sendToRpi(napRaw, "cycle-local");
+            return;
+        }
 
         for (let reads = 0; reads < CYCLE_MAX_READS; reads++) {
             const id = _cycleNextId;
@@ -423,14 +444,15 @@ async function cycleToken(run) {
             const at = token ? token.id : id;
             _cycleNextId = at > 0 ? at - 1 : null;   // below #0 is round to the newest
             if (token) {
-                NapClient.sendToRpi(token.naplps, "cycle");
+                NapClient.sendToRpi(token.naplps, "cycle-chain");
                 return;
             }
         }
     } catch (e) {
-        // A read that failed leaves the count where it was, for the next tick.
-        console.warn("[nap-xtz] token cycle:", e.message || e);
+        // A token that failed to read leaves the count where it was, for the
+        // chain's next turn.
+        console.warn("[nap-xtz] Pi cycle:", e.message || e);
     } finally {
-        if (run === _cycleRun) scheduleTokenCycle(Math.max(0, _cycleInterval - (Date.now() - started)));
+        if (run === _cycleRun) scheduleRpiCycle(Math.max(0, _cycleInterval - (Date.now() - started)));
     }
 }
