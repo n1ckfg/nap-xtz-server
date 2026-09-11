@@ -309,9 +309,11 @@ async function pollChain() {
             // the same way the slideshow's frames do.
             sendNaplpsToRpi(token.naplps, "chain");
 
-            // If a page is drawing, that was the Pi cycle's chain turn, and the
-            // count starts over from this token (see rpi-cycle.js).
-            rpiCycle.minted(token.id);
+            // If the cycle is running -- a page drawing, or running its
+            // slideshow -- that was its chain turn, and the count starts over
+            // from this token (see rpi-cycle.js). Slideshow pages have it
+            // already, from the broadcast above.
+            rpiCycle.minted(token);
         }
         lastSeenId = latestId;
     } catch (e) {
@@ -629,11 +631,12 @@ function sendCommandToRpi(command) {
     return sent > 0;
 }
 
-// ─── Drawing-mode cycle ───────────────────────────────────────────────────────
-// While a page is in drawing mode the Pi takes turns between chain tokens and
-// the slideshow's local files -- rpi-cycle.js has the order. It runs here,
-// where the chain reads and the files already are; the page only says when
-// drawing mode starts and stops.
+// ─── Slideshow cycle ──────────────────────────────────────────────────────────
+// One cycle of slides -- chain tokens taking turns with the slideshow's local
+// files, in the order rpi-cycle.js keeps -- for the Pi while a page is in
+// drawing mode, and for a page running its slideshow in review mode, which gets
+// each slide as the Pi does. It runs here, where the chain reads and the files
+// already are; the pages only say when they join and leave.
 const { RpiCycle } = require("./rpi-cycle");
 
 const IMAGES_DIR = path.join(__dirname, "public", "images");
@@ -648,14 +651,23 @@ async function slideshowFiles() {
     return (await fs.promises.readdir(IMAGES_DIR)).filter(function(name) { return name.endsWith(".nap"); });
 }
 
-// One at random. The page's loadStrings() drops a file's line breaks, so this
-// does too, and a file looks the same on the Pi whichever side sent it.
+// One at random, as { file, naplps }. Line breaks are dropped, as the slideshow
+// has always dropped them (the page used to read these through p5's
+// loadStrings()), so a file shows as it always has.
 async function readRandomSlideshowFile() {
     const files = await slideshowFiles();
     if (!files.length) throw new Error("no slideshow files in " + IMAGES_DIR);
     const name = path.basename(files[Math.floor(Math.random() * files.length)]);
     const text = await fs.promises.readFile(path.join(IMAGES_DIR, name), "latin1");
-    return text.replace(/[\r\n]/g, "");
+    return { file: name, naplps: text.replace(/[\r\n]/g, "") };
+}
+
+// Pages running their slideshow, which get each slide as the Pi does.
+const slideshowPages = new Map();   // socket id -> socket
+
+function sendSlide(slide) {
+    sendNaplpsToRpi(slide.naplps, slide.source);
+    slideshowPages.forEach(function(socket) { socket.emit("slide", slide); });
 }
 
 const rpiCycle = new RpiCycle({
@@ -665,19 +677,33 @@ const rpiCycle = new RpiCycle({
         return lastSeenId >= 0 ? lastSeenId : (await readNextTokenId()) - 1;
     },
     readLocal: readRandomSlideshowFile,
-    send: sendNaplpsToRpi,
-    canSend: anyRpiConnected,
-    onError: function(e) { console.warn("[rpi] cycle: " + e.message); }
+    send: sendSlide,
+    // Somebody to show it to: a Pi, or a page running its slideshow.
+    canSend: function() { return anyRpiConnected() || slideshowPages.size > 0; },
+    onError: function(e) { console.warn("[cycle] " + e.message); }
 });
 
-// A page entering or leaving drawing mode -- or going away, which is leaving too.
-function setDrawingMode(socket, active, interval) {
+// A page's part in the cycle, as it last said: in drawing mode it wants the Pi
+// kept busy, and running its slideshow it wants the slides too. Going away is
+// leaving both.
+function setCycleState(socket, state) {
+    const drawing = !!(state && state.drawing);
+    const slideshow = !!(state && state.slideshow);
+    const joining = slideshow && !slideshowPages.has(socket.id);
     const wasRunning = rpiCycle.running;
-    rpiCycle.setClient(socket.id, active, interval);
+
+    if (slideshow) slideshowPages.set(socket.id, socket);
+    else slideshowPages.delete(socket.id);
+    rpiCycle.setClient(socket.id, drawing || slideshow, state && state.interval);
+
+    // A slideshow joining a cycle already under way starts on the slide showing
+    // now, rather than on a wait for the next one.
+    if (joining && wasRunning && rpiCycle.lastSlide) socket.emit("slide", rpiCycle.lastSlide);
+
     if (rpiCycle.running && !wasRunning) {
-        console.log("[rpi] drawing mode: cycling every " + (rpiCycle.interval / 1000) + "s");
+        console.log("[cycle] started: a slide every " + (rpiCycle.interval / 1000) + "s");
     } else if (!rpiCycle.running && wasRunning) {
-        console.log("[rpi] drawing mode over: cycle stopped");
+        console.log("[cycle] stopped: no page drawing or running its slideshow");
     }
 }
 
@@ -860,14 +886,16 @@ app.get("/api/rpi/status", function(req, res) {
             return { host: rpi.host, url: rpi.url, connected: rpi.connected };
         }),
         naplpsFormat: RPI.naplpsFormat,
-        // The drawing-mode cycle (rpi-cycle.js): whether any page is drawing.
-        cycle: { running: rpiCycle.running, drawingPages: rpiCycle.clients.size, interval: rpiCycle.interval }
+        // The slideshow cycle (rpi-cycle.js): whether it runs, and for how many
+        // pages -- drawing, or running their slideshow.
+        cycle: { running: rpiCycle.running, pages: rpiCycle.clients.size,
+                 slideshowPages: slideshowPages.size, interval: rpiCycle.interval }
     });
 });
 
-// Send one drawing to the Pi -- and only to the Pi. This is the slideshow's
-// route: those frames are already on the client's canvas, so broadcasting them
-// to every other client would be a round trip to nowhere.
+// Send one drawing to the Pi -- and only to the Pi -- for a client with a
+// drawing of its own to show there, without broadcasting it to every other
+// client. (The slideshow no longer comes this way: the backend runs it.)
 app.post("/api/rpi/naplps", function(req, res) {
     const napRaw = req.body && req.body.naplps;
 
@@ -934,7 +962,7 @@ io.on("connection", function(socket) {
     //~
     socket.on("disconnect", function(event) {
         console.log("A socket.io user disconnected.");
-        setDrawingMode(socket, false);
+        setCycleState(socket, null);
     });
     //~
     // Hand the newcomer whatever is current so it has something to draw.
@@ -960,7 +988,7 @@ io.on("connection", function(socket) {
         broadcast("naplps", { source: payload.source || "client", naplps: payload.naplps }, socket);
     });
     //~
-    // A drawing meant for the Pi alone -- what slideshow mode sends.
+    // A drawing meant for the Pi alone.
     socket.on("rpi_naplps", function(data) {
         const payload = typeof data === "string" ? { naplps: data } : (data || {});
         const problem = checkNaplpsForRpi(payload.naplps);
@@ -976,10 +1004,10 @@ io.on("connection", function(socket) {
         sendCommandToRpi(typeof data === "string" ? data : (data && data.command));
     });
     //~
-    // A page entering or leaving drawing mode. While any page is in it the Pi
-    // runs its cycle, at the slideshow interval the page sends along.
-    socket.on("drawing_mode", function(data) {
-        setDrawingMode(socket, !!(data && data.active), data && data.interval);
+    // A page's part in the cycle: { drawing, slideshow, interval }, sent whole
+    // whenever it changes (see setCycleState).
+    socket.on("cycle", function(data) {
+        setCycleState(socket, data);
     });
 });
 

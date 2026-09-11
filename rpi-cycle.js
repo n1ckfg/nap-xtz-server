@@ -1,23 +1,25 @@
-// The Raspberry Pi's cycle while a page is in drawing mode.
+// The cycle of slides the backend runs: the Raspberry Pi's while a page is in
+// drawing mode, and a page's own slideshow in review mode. It is one cycle, so
+// the page and the Pi agree on what comes next.
 //
-// Drawing mode has the page's screen, so the Pi has nothing of the page's to
-// follow. It gets a drawing every slideshow interval instead, taking turns: a
-// token from the chain, then one of the slideshow's local files at random, then
-// the next token. The tokens go newest first, back to #0, then round to the
-// newest again. A new mint puts the count back at the newest -- the watcher has
-// already sent that one to the Pi, so it counts as the chain's turn: a full
-// interval, then a local file, then the token before it.
+// It takes turns: a token from the chain, then one of the slideshow's local
+// files at random, then the next token. The tokens go newest first, back to #0,
+// then round to the newest again. A new mint puts the count back at the newest
+// -- the watcher has already sent that one to the Pi and to every page, so it
+// counts as the chain's turn: a full interval, then a local file, then the
+// token before it.
 //
 // This used to run in the page, which fetched every drawing only to send it
 // straight back for the Pi. The backend has the chain and the files to hand,
-// so the page now only says when drawing mode starts and stops, and app.js
-// wires this to its TzKT reads, the slideshow folder and the Pi links.
+// so pages now only say when they join and leave, and app.js wires this to its
+// TzKT reads, the slideshow folder, the Pi links and the pages running their
+// slideshow, which get each slide as the Pi does.
 //
 // Each tick schedules the next when its reads are done, so a slow one can't
 // stack ticks up, but times it from when it began, so reads don't stretch the
 // interval either. Every start, stop and restart bumps `run`, and a tick checks
 // it after each read: one still out when a mint lands must not then put an
-// older drawing over the new one on the Pi.
+// older drawing over the new one.
 
 // A chain turn that meets ids with no drawing passes over them in the same
 // tick, up to this many reads, so a long run of them can't fire off a burst.
@@ -36,12 +38,13 @@ function clampInterval(ms) {
 }
 
 class RpiCycle {
-  // readToken(id)  -> { id, naplps }, or null for an id with no drawing
-  // newestId()     -> the newest id on chain, or -1 when there are none
-  // readLocal()    -> a random local file's NAPLPS
-  // send(nap, src) -> puts a drawing on the Pi(s)
-  // canSend()      -> whether any Pi is listening
-  // clock          -> { setTimeout, clearTimeout, now }, for tests
+  // readToken(id) -> { id, naplps, link }, or null for an id with no drawing
+  // newestId()    -> the newest id on chain, or -1 when there are none
+  // readLocal()   -> { file, naplps } for a random local file
+  // send(slide)   -> shows a slide: { source, naplps }, plus the token's `id`
+  //                  and `link` or the local `file`
+  // canSend()     -> whether anybody is watching: a Pi, or a page's slideshow
+  // clock         -> { setTimeout, clearTimeout, now }, for tests
   constructor(options) {
     this.readToken = options.readToken;
     this.newestId = options.newestId;
@@ -55,6 +58,7 @@ class RpiCycle {
     this.interval = DEFAULT_INTERVAL;
     this.localTurn = false;     // whose turn is next: a local file's, or the chain's
     this.nextId = null;         // the chain's next token; null for whichever is newest
+    this.lastSlide = null;      // the slide showing now, for a slideshow that joins partway
     this.timer = null;
     this.run = 0;
   }
@@ -63,9 +67,8 @@ class RpiCycle {
     return this.clients.size > 0;
   }
 
-  // A page entering or leaving drawing mode -- disconnecting counts as
-  // leaving. The cycle runs while any page is in it, at the interval the
-  // latest to enter asked for.
+  // A page joining or leaving -- disconnecting counts as leaving. The cycle
+  // runs while any page is in it, at the interval the latest to join asked for.
   setClient(id, active, interval) {
     const wasRunning = this.running;
     if (active) {
@@ -79,11 +82,13 @@ class RpiCycle {
     else if (!this.running && wasRunning) this._stop();
   }
 
-  // Token `id` has just gone to the Pi as a new mint, which was the chain's turn.
-  minted(id) {
+  // A new mint has just gone to the Pi and to every page, which was the chain's
+  // turn: it is the slide showing now.
+  minted(token) {
     if (!this.running) return;
+    this.lastSlide = { source: 'chain', naplps: token.naplps, id: token.id, link: token.link };
     this.localTurn = true;
-    this.nextId = id > 0 ? id - 1 : null;
+    this.nextId = token.id > 0 ? token.id - 1 : null;
     this._schedule(this.interval);
   }
 
@@ -96,6 +101,7 @@ class RpiCycle {
   _stop() {
     this.clock.clearTimeout(this.timer);
     this.timer = null;
+    this.lastSlide = null;
     this.run++;
   }
 
@@ -105,11 +111,16 @@ class RpiCycle {
     this.timer = this.clock.setTimeout(() => this._tick(run), delay);
   }
 
+  _show(slide) {
+    this.lastSlide = slide;
+    this.send(slide);
+  }
+
   async _tick(run) {
     const started = this.clock.now();
     try {
-      // With no Pi listening there is no one to read any of it for, and the
-      // turn waits for one to come back.
+      // With nobody watching -- no Pi listening, no page running its slideshow
+      // -- there is no one to read any of it for, and the turn waits.
       if (!this.canSend()) return;
 
       // The turn passes on whatever this one comes to, so a chain that can't
@@ -118,9 +129,9 @@ class RpiCycle {
       this.localTurn = !localTurn;
 
       if (localTurn) {
-        const napRaw = await this.readLocal();
+        const local = await this.readLocal();
         if (run !== this.run) return;
-        this.send(napRaw, 'cycle-local');
+        this._show({ source: 'cycle-local', naplps: local.naplps, file: local.file });
         return;
       }
 
@@ -136,7 +147,7 @@ class RpiCycle {
 
         this.nextId = id > 0 ? id - 1 : null;   // below #0 is round to the newest
         if (token) {
-          this.send(token.naplps, 'cycle-chain');
+          this._show({ source: 'cycle-chain', naplps: token.naplps, id: token.id, link: token.link });
           return;
         }
       }

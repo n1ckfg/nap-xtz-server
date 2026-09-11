@@ -48,20 +48,14 @@
 
 			let scaleFactor = 1;
 
-			// Slideshow mode: toggled on by the "slideshow" link. While active it
-			// plays a random .nap from ./images every slideshow_interval seconds.
-			// Loading specific content or entering live drawing stops it.
+			// Slideshow mode: toggled on by the "slideshow" link. While active the
+			// backend runs it -- the same cycle that keeps the Pi busy in drawing
+			// mode (rpi-cycle.js) -- and sends each slide here as it puts it on the
+			// Pi, every slideshow_interval seconds. Loading specific content or
+			// entering live drawing stops it.
 			let slideshow_interval = 10; // seconds
 			let slideshowActive = false;
 			let liveDrawingActive = false;
-			let slideshowPlayTimer = null; // interval between slides
-			// Fallback list (used if ./images/nap-list.json fails to load).
-			let napFiles = [
-			    "output_20260222_181752.nap", "output_20260222_181957.nap",
-			    "output_20260222_181616.nap", "output_20260222_181140.nap",
-			    "output_20260222_181729.nap", "output_20260222_181558.nap",
-			    "output_20260222_181503.nap"
-			];
 
 			let dropZone;
 			let sW = 640;
@@ -116,8 +110,6 @@
 			function preload() {
 			    isMobile = detectMobile();
 
-			    //if (isMobile) 
-			    //loadNewTelidon("./images/output_20260222_181752.nap");
 			    loadLatestToken();
 			}
 
@@ -193,12 +185,8 @@
 			    // Initialise Tezos wallet and load latest on-chain token.
 			    initTezos();
 
-			    // Load the .nap manifest for slideshow mode (falls back to the
-			    // hardcoded napFiles list if the fetch fails).
-			    fetch("./images/nap-list.json")
-			        .then(function(r) { return r.json(); })
-			        .then(function(list) { if (Array.isArray(list) && list.length) napFiles = list; })
-			        .catch(function() { /* keep fallback list */ });
+			    // The slideshow's slides come from the backend (see showSlide).
+			    NapClient.onSlide(showSlide);
 			}
 
 			function draw() {
@@ -306,6 +294,12 @@
 
 			function loadTelidonFromText(input, doClear=true) {
 				stopSlideshow(); // deliberate content load takes over from the slideshow
+				drawNap(input, doClear);
+			}
+
+			// Puts a drawing on the canvas, and makes it the one the Mint button
+			// would mint -- without stopping the slideshow, whose slides come this way.
+			function drawNap(input, doClear=true) {
 				window.pendingNapRaw = input;
 				if (doClear) {
 					telidon = []
@@ -324,27 +318,6 @@
 				loadTelidonFromText(field.value); //, false);
 			}
 
-			function loadNewTelidon(fileName) {
-			    loadStrings(fileName, function(response) {
-			        telidon = [];
-			        let reader = new FileReader();
-			        reader.onload = function(e2) {
-			        	window.pendingNapRaw = e2.target.result;
-			            telidon.push(new TelidonDraw([e2.target.result], sW, sW));
-			            recording = true;
-						setSize(e2.target.result.length);
-						loop(); // new content to animate — restart the draw loop
-						// While the slideshow runs, every frame we draw also goes
-						// out to the Raspberry Pi. The backend owns that link, so
-						// this is a no-op when no Pi is configured.
-						if (slideshowActive && window.NapClient) {
-							NapClient.sendToRpi(e2.target.result, "slideshow");
-						}
-			        }
-			        reader.readAsText(new Blob(response), 'UTF-8');
-			    });
-			}
-
 			// ── Slideshow mode ──
 
 			function startSlideshow() {
@@ -360,28 +333,29 @@
 			    slideshowActive = true;
 			    const link = document.getElementById("slideshow");
 			    if (link) link.classList.add("active");
-			    loadRandomNap();
-			    slideshowPlayTimer = setInterval(function() {
-			        if (liveDrawingActive) { stopSlideshow(); return; }
-			        loadRandomNap();
-			    }, slideshow_interval * 1000);
+			    // The backend runs the slideshow -- the same cycle the Pi gets in
+			    // drawing mode -- and sends each slide here as it puts it on the Pi.
+			    NapClient.setSlideshow(true, slideshow_interval * 1000);
 			}
 
+			// Everything that puts other content up calls this, so it only speaks to
+			// the backend when there is a slideshow to stop.
 			function stopSlideshow() {
+			    if (!slideshowActive) return;
 			    slideshowActive = false;
 			    const link = document.getElementById("slideshow");
 			    if (link) link.classList.remove("active");
-			    if (slideshowPlayTimer !== null) {
-			        clearInterval(slideshowPlayTimer);
-			        slideshowPlayTimer = null;
-			    }
+			    NapClient.setSlideshow(false);
 			}
 			window.stopSlideshow = stopSlideshow;
 
-			function loadRandomNap() {
-			    if (!napFiles.length) return;
-			    const file = napFiles[Math.floor(Math.random() * napFiles.length)];
-			    loadNewTelidon("./images/" + file);
+			// A slide from the backend's cycle: drawn without stopping the slideshow,
+			// and without being sent on -- the backend has put it on the Pi already.
+			// One arriving after the slideshow has stopped is dropped.
+			function showSlide(slide) {
+			    if (!slideshowActive || liveDrawingActive) return;
+			    drawNap(slide.naplps);
+			    noteSlide(slide); // js/tezos/tezos.js: the status line, and the arrow keys' place
 			}
 
 			//function setPreview(name) {
@@ -723,11 +697,11 @@
 	<body class="ui-hidden">
 		<div id="container">
 			<div class="sketch">
-				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz-server"><i>repo</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
+				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz-server"><i>repo</i></a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;
 				<a href="javascript:void(0)" id="prev-token"><i>&lt;&lt;</i></a>&nbsp;
 				<a href="javascript:void(0)" id="latest"><i>latest</i></a>&nbsp;
-				<a href="javascript:void(0)" id="next-token"><i>&gt;&gt;</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
-				<a href="javascript:void(0)" id="clear"><i>clear</i></a>&nbsp;&nbsp;|&nbsp;&nbsp;
+				<a href="javascript:void(0)" id="next-token"><i>&gt;&gt;</i></a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;
+				<a href="javascript:void(0)" id="clear"><i>clear</i></a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;
 				<a href="javascript:void(0)" id="slideshow"><i>slideshow</i></a>
 			</div>
 

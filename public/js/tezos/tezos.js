@@ -79,8 +79,13 @@ async function initTezos() {
             // Behind the drawing overlay the canvas can't be seen, and leaving
             // drawing mode puts the newest token on it anyway -- so a drawing
             // arriving meanwhile isn't drawn, or p5 would run the reveal and the
-            // VHSC pass under the overlay for nothing.
-            if (!liveDrawingActive) loadTelidonFromText(message.naplps);
+            // VHSC pass under the overlay for nothing. During the slideshow a new
+            // mint is the cycle's chain turn (rpi-cycle.js), so it goes up as a
+            // slide and the slideshow carries on; anything else takes over.
+            if (!liveDrawingActive) {
+                if (slideshowActive && message.source === "chain") drawNap(message.naplps);
+                else loadTelidonFromText(message.naplps);
+            }
             if (message.source === "chain") {
                 noteTokenShown(message.id, message.link); // a new mint becomes the arrow keys' right-hand end
                 setStatus(tokenLink("Token #" + message.id, message.link) + " loaded from chain");
@@ -331,6 +336,18 @@ function noteTokenShown(id, link) {
     _currentTokenId = id;
     if (_latestTokenId === null || id > _latestTokenId) _latestTokenId = id;
     if (link) _tokenLink = link;
+}
+
+// A slide from the backend's cycle, drawn by index.html's showSlide(). A token
+// moves the arrow keys' place, as one loaded any other way does; a local file
+// leaves it where it was, as a dropped one does.
+function noteSlide(slide) {
+    if (typeof slide.id === "number") {
+        noteTokenShown(slide.id, slide.link);
+        setStatus(tokenLink("Token #" + slide.id, slide.link) + " (slideshow)");
+    } else {
+        setStatus("Slideshow: " + (slide.file || "local file"));
+    }
 }
 
 // Wraps a status line's subject in the explorer link. Every token points at the

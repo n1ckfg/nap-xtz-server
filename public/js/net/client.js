@@ -9,7 +9,10 @@ const NapClient = (function() {
 
     let _configRequest = null;
     let _socket = null;
-    let _drawingMode = null;   // { active, interval }, once the page has said
+    // The page's part in the backend's slideshow cycle (rpi-cycle.js), sent whole
+    // whenever it changes, and the slideshow's own listeners.
+    const _cycle = { drawing: false, slideshow: false, interval: null };
+    const _slideHandlers = [];
     const _naplpsHandlers = [];
 
     async function api(path, options) {
@@ -85,8 +88,9 @@ const NapClient = (function() {
 
         _socket.on("connect", function() {
             console.log("[nap-client] connected to server");
-            // A restarted server knows nothing of drawing mode, so say it again.
-            if (_drawingMode) _socket.emit("drawing_mode", _drawingMode);
+            // A restarted server knows nothing of the page's part in the
+            // cycle, so say it again.
+            _socket.emit("cycle", _cycle);
         });
 
         _socket.on("naplps", function(message) {
@@ -94,6 +98,11 @@ const NapClient = (function() {
             console.log("[nap-client] naplps message from " + (message.source || "?") +
                         ", " + message.naplps.length + " bytes");
             _naplpsHandlers.forEach(function(handler) { handler(message); });
+        });
+
+        _socket.on("slide", function(slide) {
+            if (!slide || !slide.naplps) return;
+            _slideHandlers.forEach(function(handler) { handler(slide); });
         });
 
         _socket.on("error_message", function(message) {
@@ -151,12 +160,30 @@ const NapClient = (function() {
         });
     }
 
-    // Drawing mode on or off. While a page is in it the backend runs the Pi's
-    // cycle (rpi-cycle.js) every `intervalMs`. Before the socket is up the
+    // Drawing mode and the review-mode slideshow are both the backend's cycle
+    // (rpi-cycle.js): in drawing mode it keeps the Pi busy, and the slideshow
+    // gets each slide as well, through onSlide(). Before the socket is up the
     // state waits, and goes out on connecting.
     function setDrawingMode(active, intervalMs) {
-        _drawingMode = { active: !!active, interval: intervalMs };
-        if (_socket && _socket.connected) _socket.emit("drawing_mode", _drawingMode);
+        _cycle.drawing = !!active;
+        if (intervalMs) _cycle.interval = intervalMs;
+        sendCycle();
+    }
+
+    function setSlideshow(active, intervalMs) {
+        _cycle.slideshow = !!active;
+        if (intervalMs) _cycle.interval = intervalMs;
+        sendCycle();
+    }
+
+    function sendCycle() {
+        if (_socket && _socket.connected) _socket.emit("cycle", _cycle);
+    }
+
+    // Register a callback for the slideshow's slides: { source, naplps }, plus
+    // the token's `id` and `link` or the local `file`.
+    function onSlide(handler) {
+        _slideHandlers.push(handler);
     }
 
     // "take_photo" saves a file on the Pi; "stream_photo" sends one back.
@@ -185,6 +212,8 @@ const NapClient = (function() {
         sendToRpi: sendToRpi,
         showToken: showToken,
         setDrawingMode: setDrawingMode,
+        setSlideshow: setSlideshow,
+        onSlide: onSlide,
         rpiCommand: rpiCommand
     };
 
