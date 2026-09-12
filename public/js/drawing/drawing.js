@@ -1338,29 +1338,54 @@ function convertToNAPLPS() {
             
             const keep = simplifyIndices(points, epsilon, 0, points.length - 1);
             
-            for (let i = 0; i < keep.length - 1; i++) {
-                const a = points[keep[i]];
-                const b = points[keep[i+1]];
-                const ra = Math.max(radii[keep[i]], 0.0005);
-                const rb = Math.max(radii[keep[i+1]], 0.0005);
+            const leftEdge = [];
+            const rightEdge = [];
+            
+            for (let i = 0; i < keep.length; i++) {
+                const idx = keep[i];
+                const p = points[idx];
+                const r = Math.max(radii[idx], 0.0005);
                 
-                let tX = b.x - a.x;
-                let tY = b.y - a.y;
+                let tX = 0, tY = 0;
+                if (i === 0) {
+                    const next = points[keep[i+1]];
+                    tX = next.x - p.x;
+                    tY = next.y - p.y;
+                } else if (i === keep.length - 1) {
+                    const prev = points[keep[i-1]];
+                    tX = p.x - prev.x;
+                    tY = p.y - prev.y;
+                } else {
+                    const next = points[keep[i+1]];
+                    const prev = points[keep[i-1]];
+                    tX = next.x - prev.x;
+                    tY = next.y - prev.y;
+                }
+                
                 const len = Math.hypot(tX, tY);
-                if (len < 1e-8) continue;
-                tX /= len; tY /= len;
+                if (len > 1e-8) {
+                    tX /= len;
+                    tY /= len;
+                } else {
+                    tX = 1;
+                    tY = 0;
+                }
                 
                 const pX = -tY;
                 const pY = tX;
                 
-                const points2D = [
-                    new window.Vector2(Math.max(0, Math.min(1, a.x + pX * ra)), Math.max(0, Math.min(1, a.y + pY * ra))),
-                    new window.Vector2(Math.max(0, Math.min(1, b.x + pX * rb)), Math.max(0, Math.min(1, b.y + pY * rb))),
-                    new window.Vector2(Math.max(0, Math.min(1, b.x - pX * rb)), Math.max(0, Math.min(1, b.y - pY * rb))),
-                    new window.Vector2(Math.max(0, Math.min(1, a.x - pX * ra)), Math.max(0, Math.min(1, a.y - pY * ra)))
-                ];
-                input.push(new window.NapInputWrapper(color, points2D, true));
+                leftEdge.push(new window.Vector2(
+                    Math.max(0, Math.min(1, p.x + pX * r)),
+                    Math.max(0, Math.min(1, p.y + pY * r))
+                ));
+                rightEdge.unshift(new window.Vector2(
+                    Math.max(0, Math.min(1, p.x - pX * r)),
+                    Math.max(0, Math.min(1, p.y - pY * r))
+                ));
             }
+            
+            const points2D = [...leftEdge, ...rightEdge];
+            input.push(new window.NapInputWrapper(color, points2D, true));
         }
         return input;
     };
