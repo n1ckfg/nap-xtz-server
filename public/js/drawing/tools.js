@@ -28,6 +28,21 @@ const MIN_RADIUS = 0.0005;      // keeps a piece from collapsing into a line
 // against the ideal brush over the harness corpus, rebuilding the geometry
 // exactly is worth about two points of fidelity and the tolerance is worth ten
 // to thirty: a hairpin came back at 0.643 of the ideal at 0.002 and 0.965 here.
+//
+// This is the only simplification tolerance in the project, and every path that
+// gets simplified reads it from here: the ladder in convertToNAPLPS(), the
+// defaults on toBrushShapes() and toBrushPolygons() below, the SVG importer in
+// index.html (via the module script that puts it on `window`, since that script
+// is not a module and cannot import), and `--tolerance` in
+// tools/brush-geometry. The importer used to carry its own 0.02 in three
+// places, which simplified an imported drawing forty times more coarsely than a
+// drawn one for no reason anybody had written down.
+//
+// MIN_STEP is not a second knob for the same thing. It is the 4-byte domain's
+// quantum, 1/2048, and the geometry guards below are multiples of it because
+// they are about what the format can represent, not about how much detail to
+// keep. It is also the ladder's floor: doubling cannot leave zero, and zero is
+// what this constant means when set to keep every point.
 export const BRUSH_SIMPLIFY = MIN_STEP;
 
 // How much room a piece needs before the encoder's rounding could fold it. Four

@@ -1347,7 +1347,6 @@ class NapEncoder {
 		this.maxBitVals = Math.pow(2, this.bitExponent);
         this.firstBitSign = true; 
 
-        this.lastColor = undefined;
 		this.cmds = this.generateCommands();
 		this.napRaw = this.cmds.join("");
 		this.debug = false;
@@ -1667,10 +1666,21 @@ class NapEncoder {
 	makeNapStroke(_isFill, _color, _points) {
 		let returns = [];
 
-		if (this.lastColor === undefined || getDistance(this.lastColor, _color) > 0.1) {
-			returns.push(this.makeNapSelectColor(_color));
-			this.lastColor = _color;
-		}
+		// Every polygon carries its own SELECT COLOR, whatever the last one was.
+		// The dedupe that used to stand here -- skip the command unless the
+		// colour had moved further than 0.1 -- almost never fired on an imported
+		// SVG, where each path brings its own fill, so the files in
+		// public/images carry one SELECT COLOR per POLY. A live drawing is the
+		// opposite case: every polygon of a stroke is the same colour, so a run
+		// of eighty of them shared a single colour command. That was the
+		// sharpest structural difference between the drawings the Pi renders
+		// whole and the ones it renders with pieces missing (docs/REPORT_2.md),
+		// and it is now gone: one command stream to reason about rather than one
+		// per kind of input.
+		//
+		// It costs five bytes a polygon, which is the cover run's to give up
+		// before the centreline's -- see the ladder in convertToNAPLPS().
+		returns.push(this.makeNapSelectColor(_color));
 
 		returns.push(this.makeNapOpcode(_isFill));
 		returns.push(this.makeNapPoints(_points));

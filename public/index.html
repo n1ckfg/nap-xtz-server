@@ -34,6 +34,15 @@
 		<script type="text/javascript" src="/socket.io/socket.io.js"></script>
 		<script type="text/javascript" src="./js/net/client.js"></script>
 		<script type="text/javascript" src="./js/tezos/tezos.js"></script>
+		<!-- One simplification tolerance for the whole page. It lives in
+		     js/drawing/tools.js because that is where the brush geometry it was
+		     chosen for lives, and the harness in tools/brush-geometry imports it
+		     from there too; this hands it to the plain script below, which cannot
+		     import from a module. See brushSimplify(). -->
+		<script type="module">
+			import { BRUSH_SIMPLIFY } from './js/drawing/tools.js';
+			window.BRUSH_SIMPLIFY = BRUSH_SIMPLIFY;
+		</script>
 		<script type="text/javascript">
 			"use strict";
 
@@ -442,7 +451,7 @@
 			    		}
 			    	}
 					
-					points = rdpSimplify(points, 0.02);
+					points = rdpSimplify(points);
 
 					const stroke = new NapInputWrapper(color, points, isFill);
 					input.push(stroke);
@@ -476,7 +485,7 @@
 						}
 			    	}
 					
-					points = rdpSimplify(points, 0.02);
+					points = rdpSimplify(points);
 
 					const stroke = new NapInputWrapper(color, points, isFill);
 					input.push(stroke);
@@ -524,7 +533,7 @@
 			    		//}
 			    	}
 
-			    	points = rdpSimplify(points, 0.02); // default 0.005, higher = more simplification
+			    	points = rdpSimplify(points);
 
 			    	if (points.length > 0) {
 			    		const stroke = new NapInputWrapper(color, points, isFill);
@@ -554,7 +563,26 @@
 				loadTelidonFromText(encoder.napRaw);
 			}
 
-		function rdpSimplify(points, epsilon) {
+		// The one simplification tolerance, and the only place on this page that
+		// names it. It is owned by BRUSH_SIMPLIFY in js/drawing/tools.js, which
+		// the module script above hands over on `window`; SVG import and live
+		// drawing are simplified alike, as they are encoded alike.
+		//
+		// Read through a function rather than captured into a constant, because
+		// this plain script is parsed before that deferred module runs -- and it
+		// refuses to guess rather than carrying on without it. rdpSimplify with
+		// an undefined epsilon compares `maxDist > undefined`, which is false at
+		// every recursion, so every path would quietly come back as the straight
+		// line between its first and last point: an import that looks broken
+		// rather than a load that plainly failed.
+		function brushSimplify() {
+			if (!Number.isFinite(window.BRUSH_SIMPLIFY)) {
+				throw new Error("BRUSH_SIMPLIFY has not arrived from js/drawing/tools.js");
+			}
+			return window.BRUSH_SIMPLIFY;
+		}
+
+		function rdpSimplify(points, epsilon = brushSimplify()) {
 			if (points.length <= 2) return points;
 			let start = points[0], end = points[points.length - 1];
 			let maxDist = 0, maxIdx = 0;

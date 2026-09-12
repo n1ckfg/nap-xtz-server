@@ -143,9 +143,17 @@ read back with `inspect` instead of reconstructed.
   `allPointsRelative && i == 0` path carries `// TODO find something to test this`
   in the C++ and the same gap in the JS. Live drawings use `SET & POLY FILLED`,
   which does not take it, so it is not implicated — but nothing exercises it.
-- **Live drawings emit far fewer colour commands than the working files**: 4
+- ~~**Live drawings emit far fewer colour commands than the working files**: 4
   SELECT COLOR for 326 polygons, against one per polygon in every `public/images`
-  file checked. The colour state machines match on both sides, so this is not
-  itself a fault, but it is the sharpest structural difference between the files
-  that work and the files that do not, and it is where I would look first if the
-  verbose log points at colour.
+  file checked.~~ **Closed** — `makeNapStroke()` now emits a SELECT COLOR in
+  front of every POLY rather than skipping it when the colour hasn't moved, so
+  both kinds of input produce the same command stream: the four-stroke harness
+  drawing went from 4 SELECT COLOR for 326 polygons to 326 for 326, matching the
+  files that play cleanly. The colour state machines already matched on both
+  sides, so this was never demonstrated to be the fault — it was the sharpest
+  structural difference between the two kinds of file, and it is now not a
+  difference at all. It costs five bytes a polygon, which the byte ladder takes
+  out of the cover run first: the four-stroke sketch still keeps both (5,452 →
+  7,062 bytes), while a hundred strokes settle a rung coarser (0.004 → 0.008).
+  It also makes a lost colour command cheap, where losing the one command at the
+  head of a stroke used to mis-colour every polygon after it.
