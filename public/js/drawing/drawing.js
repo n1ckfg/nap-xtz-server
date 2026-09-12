@@ -22,6 +22,7 @@ let worldNode;
 let worldScale;
 let frame;
 let vhscPass = null;
+let _armDelete = false;
 
 const MAX_HANDS = 2;
 
@@ -1117,6 +1118,10 @@ function animateLoop() {
 }
 
 // Export functions for external control
+export function armDelete() {
+    _armDelete = true;
+}
+
 export async function startDrawingMode(container) {
     if (isRunning) return;
     isRunning = true;
@@ -1193,6 +1198,17 @@ export async function startDrawingMode(container) {
     drawingStatusEl = container.querySelector('#drawing-status') || document.getElementById('drawing-status');
     hideDrawingStatus(); // whatever the last session ended on shouldn't greet this one
 
+    // Start rendering before the async setup so the scene is visible
+    // immediately — the animate loop guards on gestureRecognizer/results,
+    // so it is safe to run without MediaPipe.
+    animateLoop();
+
+    if (_armDelete) {
+        _armDelete = false;
+        frame.clearWithFlicker();
+        resetCamera();
+    }
+
     await setupMediaPipe();
     await setupWebcam();
 
@@ -1200,9 +1216,6 @@ export async function startDrawingMode(container) {
     if (mouseController) {
         mouseController.enable();
     }
-
-    // Start animation loop
-    animateLoop();
 }
 
 export function stopDrawingMode() {

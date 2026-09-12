@@ -722,12 +722,13 @@ export class Frame extends THREE.Group {
      * @param {Function} [onComplete] - Callback when flicker and clear complete
      */
     clearWithFlicker(onComplete) {
-        // Flicker the entire line mesh
         const startTime = performance.now();
         const flicker = () => {
             const elapsed = performance.now() - startTime;
             if (elapsed < FLICKER_DURATION) {
-                this.lineMesh.visible = Math.floor(elapsed / FLICKER_INTERVAL) % 2 === 0;
+                const vis = Math.floor(elapsed / FLICKER_INTERVAL) % 2 === 0;
+                this.lineMesh.visible = vis;
+                for (const mesh of this._fillMeshes) mesh.visible = vis;
                 requestAnimationFrame(flicker);
             } else {
                 this.lineMesh.visible = true;

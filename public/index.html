@@ -183,6 +183,7 @@
 				document.getElementById("clear").addEventListener("click", function() {
                     telidon = [];
 				    stopSlideshow();
+				    if (window.armDelete) window.armDelete();
 				    loop(); // redraw once to show the placeholder, then idle
 			    });
 
@@ -800,7 +801,7 @@
 
 		<!-- Drawing mode script -->
 		<script type="module">
-			import { startDrawingMode, stopDrawingMode } from './js/drawing/drawing.js';
+			import { startDrawingMode, stopDrawingMode, armDelete } from './js/drawing/drawing.js';
 
 			const drawingContainer = document.getElementById('drawing-container');
 
@@ -830,6 +831,7 @@
 
 			document.getElementById('btn-live-drawing').addEventListener('click', enterDrawingMode);
 			document.getElementById('btn-exit-drawing').addEventListener('click', exitDrawingMode);
+			window.armDelete = armDelete;
 
 			// The page opens straight into live drawing, with the UI chrome hidden
 			// (see .ui-hidden in main.css) — press "h", or move the mouse, for a
