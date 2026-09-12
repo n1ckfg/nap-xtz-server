@@ -14,7 +14,7 @@ const TIP_RADIUS = 0.01;
 
 // The next few are in frame widths -- the 0..1 space toBrushShapes works in,
 // where 1 is the whole drawing, so 0.005 is about three pixels of a 640-wide one.
-export const MIN_STEP = 0.0005; // 1/2048: a shorter step is a rounding error to the encoder
+export const MIN_STEP = 0.002;//0.0005; // 1/2048: a shorter step is a rounding error to the encoder
 const MIN_RADIUS = 0.0005;      // keeps a piece from collapsing into a line
 
 // Where the byte ladder in convertToNAPLPS() starts, not where it settles: the
