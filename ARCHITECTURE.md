@@ -108,8 +108,13 @@ The frontend is a single-page app (`index.html`) driven by the two core modes: *
 
 **`js/tezos/` (Web3 & Wallets)**
 - `tezos.js` - Beacon SDK integration. Connects to the user's browser wallet (e.g., Temple), receives the unsigned payload from the backend via `POST /api/tezos/mint-params`, and prompts the user to sign and broadcast. It also keeps the reader's place on the chain — the id on screen and the newest one known — and `stepToken()` moves it; `index.html` owns the key handling, as it does for "h". An id the backend answers 404 for (a mint from some other tool, with no `naplps` in its metadata) would otherwise trap the arrows on the gap, so the position moves onto it anyway and the next press continues past. Drawings the backend pushes are drawn as they arrive, except in **drawing mode**: the canvas is behind the overlay then, and leaving puts the newest token on it anyway, so drawing them would only run p5's reveal and the VHSC pass out of sight. The Beacon SDK is not in `index.html`. At 2.4 MB of script it was the page's heaviest Tezos cost, and a page whose mints the server signs never uses it, so `ensureBeacon()` loads it the first time a wallet is wanted — Connect Wallet, or a mint with no server key — or at page open when the browser has a wallet session stored (`beacon:active-account`), so that session comes back as before.
+- `fa2-naplps.mligo` & `fa2-naplps.tz` - The Ligo source and compiled Michelson smart contract representing the FA2 NAPLPS NFT structure, alongside `deploy.sh` and `import.sh` helper scripts.
 
 There are two routes to a mint, and `GET /api/config`'s `serverSigning` flag picks between them. When the backend holds a key, `mintCurrentNaplps()` posts to `POST /api/tezos/mint` and the server signs — no wallet, no popup, which is the only way the gesture mint works unattended. A connected wallet still owns the token; with none connected, the server's own address does. Without a server key it falls back to the Beacon route, loading the SDK if nothing has yet, which prompts for every operation — Temple has no blanket pre-approval to switch off.
+
+**`js/shaders/` (Post-Processing & Effects)**
+- `vhsc-p5.js` - p5.js shader implementation (WEBGL mode) for VHS-style effects and color bleeding.
+- `vhsc-three.js` - Three.js shader equivalent used to maintain visual consistency in **drawing mode**.
 
 ### Drawing Mode Integration
 
@@ -149,3 +154,10 @@ The page runs with every HTML overlay hidden (`.ui-hidden` on `<body>`, set in t
 | **Drawing mode** | shows for five seconds | shows for five seconds, each move pushing the five seconds back |
 
 The mouse only ever shows the chrome; "h" is the way to put it away. The pointer itself follows the same flag — hidden while the chrome is, back when the chrome returns (`body.ui-hidden` in `main.css`) — so a screen at rest holds the artwork and nothing else. **Drawing mode** is included in that, where the pointer used to be hidden outright: the five seconds that put "Exit Drawing" on screen now come with a pointer to reach it. The split follows what the screen is for: a viewer who reaches for the mouse in **review mode** wants the controls to stay, while in **drawing mode** the artwork *is* the screen, so a stray nudge should not leave the chrome sitting over it. The idle timer belongs to **drawing mode** — leaving that mode with one pending drops it rather than hiding the chrome five seconds into **review mode** — and `setUIHidden(true)` — which **drawing mode** calls on entry, and the slideshow when it starts — clears it too.
+ 
+---
+
+## Tools & Scripts
+
+- **`tools/` Directory**: Contains offline utilities. `brush-geometry` is used to analyze drawing geometry and optimize the simplification pipeline. `thumbnail-maker` and `key-generator.sh` support other aspects of managing assets and keys.
+- **Root Execution Scripts**: `run.*`, `setup.*`, and `kiosk-*` scripts automate server start and dependencies configuration across macOS, Windows, and Raspberry Pi environments. `redeploy.sh` enables automated deployment via GitHub webhooks.
