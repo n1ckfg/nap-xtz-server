@@ -137,26 +137,28 @@ export function shipped(stroke, camera, color, epsilon) {
 }
 
 /**
- * Every quad split, whatever its shape -- what shipped before the corner-height
+ * Every piece split, whatever its shape -- what shipped before the corner-height
  * test decided it one at a time. The safe end of the trade, and the expensive one.
  */
 export function allTriangles(stroke, camera, color, epsilon) {
   const out = [];
-  for (const { points } of quads(stroke, camera, color, epsilon)) {
-    const [a, b, c, d] = points;
-    out.push({ color, points: [a, b, c] }, { color, points: [a, c, d] });
+  for (const { points } of pieces(stroke, camera, color, epsilon)) {
+    for (let i = 1; i < points.length - 1; i++) {
+      out.push({ color, points: [points[0], points[i], points[i + 1]] });
+    }
   }
   return out;
 }
 
 /**
- * The quads those triangles are cut from, encoded whole. Worth keeping in the
- * table: it is what the split costs, measured against the thing it came from.
+ * The pieces those triangles are cut from, encoded whole -- trapezoids, corner
+ * fans and caps. Worth keeping in the table: it is what the split costs,
+ * measured against the thing it came from.
  */
-export function quads(stroke, camera, color, epsilon) {
+export function pieces(stroke, camera, color, epsilon) {
   const axis = widthAxisFor(camera);
   return stroke
-    .toBrushQuads((p) => project(p, camera), axis, epsilon)
+    .toBrushShapes((p) => project(p, camera), axis, epsilon)
     .map((points) => ({ color, points }));
 }
 
@@ -388,13 +390,14 @@ export const CANDIDATES = [
   ["chunks(8) .005", (s, cam, col) => chunks(s, cam, col, 0.005, 8)],
   ["mitred .005", (s, cam, col) => mitred(s, cam, col, 0.005)],
   ["mitred .002", (s, cam, col) => mitred(s, cam, col, 0.002)],
-  // The first of these is tools.js's own BRUSH_SIMPLIFY, whatever it is set to;
-  // the other two bracket it, so the cost of that tolerance stays visible.
+  // The first is tools.js's own BRUSH_SIMPLIFY, whatever it is set to -- now the
+  // finest rung of the byte ladder rather than a fixed setting -- and the other
+  // two are the rungs above it, which is where a busy drawing actually lands.
   ["SHIPPED hybrid", (s, cam, col) => shipped(s, cam, col)],
-  ["SHIPPED at .005", (s, cam, col) => shipped(s, cam, col, 0.005)],
-  ["SHIPPED at .01", (s, cam, col) => shipped(s, cam, col, 0.01)],
-  ["every quad split", (s, cam, col) => allTriangles(s, cam, col)],
-  ["no quad split", (s, cam, col) => quads(s, cam, col)],
+  ["SHIPPED at .001", (s, cam, col) => shipped(s, cam, col, 0.001)],
+  ["SHIPPED at .002", (s, cam, col) => shipped(s, cam, col, 0.002)],
+  ["every piece split", (s, cam, col) => allTriangles(s, cam, col)],
+  ["no piece split", (s, cam, col) => pieces(s, cam, col)],
   ["tri + joint wedges", (s, cam, col) => soupJoints(s, cam, col)]
 ];
 

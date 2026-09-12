@@ -22,10 +22,10 @@ import dotenv from "dotenv";
 import { Canvas } from "../thumbnail-maker/raster.mjs";
 import { renderNap } from "../thumbnail-maker/render.mjs";
 import { encodePNG } from "../thumbnail-maker/png.mjs";
-import { encodePolys, decodePolys, encoderInFile, maskOf, score, selfIntersections, ART } from "./naplps.mjs";
-import { CANDIDATES, Stroke, brushReference, makeCamera, project, quads, shipped, widthAxisFor } from "./candidates.mjs";
+import { encodePolys, decodePolys, encoderInFile, maskOf, napContext, score, selfIntersections, ART } from "./naplps.mjs";
+import { CANDIDATES, Stroke, brushReference, makeCamera, pieces, project, shipped, widthAxisFor } from "./candidates.mjs";
 import { STROKES, buildStroke, selectStrokes, stressStrokes } from "./strokes.mjs";
-import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from "../../public/js/drawing/tools.js";
+import { Frame, BRUSH_SIMPLIFY, MIN_STEP, BRUSH_OVERLAP_PASSES } from "../../public/js/drawing/tools.js";
 import { readMintLimit } from "../../mint-limit.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -51,12 +51,14 @@ const USAGE = `Usage: brush-geometry <command> [stroke ...] [options]
 
 Commands:
   compare [stroke ...]   score every candidate geometry against the ideal brush
-  checks                 assert the shipped toBrushQuads holds up at the edges
+  checks                 assert the shipped toBrushShapes holds up at the edges
   sheets [stroke ...]    write side-by-side PNGs: ideal, the old outline, shipped
   draw                   draw strokes through a real Frame, end to end, with
                          the byte budget ladder convertToNAPLPS() runs
   loss [stroke ...]      how much of a stroke survives when polygons go missing,
                          at each BRUSH_OVERLAP_PASSES setting
+  inspect <file ...>     what a .nap file actually contains: opcodes, points per
+                         polygon, operand alignment, off-frame and folded points
 
 Strokes: ${Object.keys(STROKES).join(", ")} (default: all)
 
@@ -188,7 +190,7 @@ function checks({ encoder }) {
   check("two points", () => {
     const polys = polygonsOf([[-1, 0, 0], [1, 0, 0]]);
     assert(polys.length >= 1, `expected a polygon, got ${polys.length}`);
-    assert(polys.every((p) => p.length === 3 || p.length === 4), "polygons should be tris or quads");
+    assert(polys.every((p) => p.length >= 3), "every polygon needs three points");
     return `one segment, ${polys.length} polygon(s) of ${polys.map((p) => p.length).join("+")} points`;
   });
 
@@ -294,13 +296,13 @@ function checks({ encoder }) {
     return `${polygons} polygons from 240 awkward strokes, ${((100 * split) / polygons).toFixed(1)}% split`;
   });
 
-  check("the quads themselves never cross as built", () => {
+  check("the pieces themselves never cross as built", () => {
     // A triangle is convex whatever you do to it, so checking the split output
-    // proves nothing; the quad builder is where the guarantee has to hold.
+    // proves nothing; the piece builder is where the guarantee has to hold.
     let crossings = 0;
     for (const [, stroke] of selectStrokes([])) {
       const reference = maskOf(brushReference(stroke, camera).map((p) => p.points), { rule: "nonzero" });
-      crossings += score(quads(stroke, camera, COLOR), reference, { encoder }).crossings;
+      crossings += score(pieces(stroke, camera, COLOR), reference, { encoder }).crossings;
     }
     assert(crossings === 0, `${crossings} self-intersections across the corpus`);
     return "over the whole corpus";
@@ -314,14 +316,18 @@ function checks({ encoder }) {
 
     const measure = () => {
       frame.updateWorldMatrix(true, false);
-      const built = rawStroke(points).toBrushQuads(
+      const built = rawStroke(points).toBrushShapes(
         (p) => project(frame.localToWorld(p.clone()), camera),
         widthAxisFor(camera, frame)
       );
       const xs = built.flat().map((p) => p.x);
-      // Measured on the quads, where a width is one edge: the widest, not the
-      // middle one, since simplification keeps different points at each zoom.
-      const widths = built.map((q) => Math.hypot(q[0].x - q[3].x, q[0].y - q[3].y));
+      // Measured on the trapezoids, where a width is one edge: the widest, not
+      // the middle one, since simplification keeps different points at each
+      // zoom. Fans and caps are skipped -- their points sit on an arc, so no
+      // pair of them spans the brush.
+      const widths = built
+        .filter((piece) => piece.length === 4)
+        .map((q) => Math.hypot(q[0].x - q[3].x, q[0].y - q[3].y));
       return { span: Math.max(...xs) - Math.min(...xs), width: Math.max(...widths) };
     };
 
@@ -407,7 +413,7 @@ function sheets(names, { out, encoder }) {
 // GET /api/config -- the server's TEZOS_MAX_BYTES, unless --limit says
 // otherwise, and lowering it is how the ladder gets exercised on a drawing
 // small enough to look at.
-const MAX_SIMPLIFY_PASSES = 5; // convertToNAPLPS() allows itself this many
+const MAX_SIMPLIFY_PASSES = 8; // convertToNAPLPS() allows itself this many
 
 function drawnStrokes(count) {
   const palette = [0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff];
@@ -449,30 +455,48 @@ function draw({ out, encoder, limit, limitSource, strokes: strokeCount, toleranc
   const projectPoint = (p) => project(frame.localToWorld(p.clone()), camera);
   const axis = widthAxisFor(camera, frame);
 
-  const buildInput = (epsilon) => {
+  const buildInput = (epsilon, passes) => {
     const polys = [];
     for (const stroke of frame.strokes) {
       if (!stroke.points || stroke.points.length < 2) continue;
       const hex = stroke.color;
       const color = [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff];
-      for (const points of stroke.toBrushPolygons(projectPoint, axis, epsilon)) polys.push({ color, points });
+      for (const points of stroke.toBrushPolygons(projectPoint, axis, epsilon, passes)) polys.push({ color, points });
     }
     return polys;
   };
 
+  // Fidelity first, insurance second, exactly as convertToNAPLPS() spends it:
+  // the centreline is fitted with no cover run at all, and only what is left
+  // over buys the cover run back.
   let epsilon = tolerance;
-  let polys = buildInput(epsilon);
+  let polys = buildInput(epsilon, 0);
   let napRaw = encodePolys(polys, { encoder });
   console.log(`pass 1  tolerance ${epsilon.toFixed(4)}  ${polys.length} polygons  ${napRaw.length} bytes`);
 
   for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && napRaw.length > limit; pass++) {
     epsilon = Math.max(epsilon * 2, MIN_STEP); // doubling alone can't leave zero
 
-    const simpler = buildInput(epsilon);
+    const simpler = buildInput(epsilon, 0);
     if (simpler.length === 0) break;
     polys = simpler;
     napRaw = encodePolys(polys, { encoder });
     console.log(`pass ${pass + 1}  tolerance ${epsilon.toFixed(4)}  ${polys.length} polygons  ${napRaw.length} bytes`);
+  }
+
+  let coverRuns = 0;
+  if (BRUSH_OVERLAP_PASSES > 0 && napRaw.length <= limit) {
+    const covered = buildInput(epsilon, BRUSH_OVERLAP_PASSES);
+    const coveredRaw = covered.length > 0 ? encodePolys(covered, { encoder }) : null;
+
+    if (coveredRaw && coveredRaw.length <= limit) {
+      polys = covered;
+      napRaw = coveredRaw;
+      coverRuns = BRUSH_OVERLAP_PASSES;
+      console.log(`cover   ${BRUSH_OVERLAP_PASSES} run(s) fit too   ${polys.length} polygons  ${napRaw.length} bytes`);
+    } else if (coveredRaw) {
+      console.log(`cover   ${BRUSH_OVERLAP_PASSES} run(s) would be ${coveredRaw.length} bytes -- no room, detail kept instead`);
+    }
   }
 
   const decoded = decodePolys(napRaw, { encoder });
@@ -480,11 +504,15 @@ function draw({ out, encoder, limit, limitSource, strokes: strokeCount, toleranc
     (n, cmd) => n + cmd.points.filter((p) => p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1).length,
     0
   );
-  const wrongLength = decoded.filter((cmd) => cmd.points.length !== 3 && cmd.points.length !== 4).length;
+  // Trapezoids have four points, a split one three, and a corner fan or a cap as
+  // many as its arc needed -- so the only malformed length is one too short to
+  // fill at all.
+  const wrongLength = decoded.filter((cmd) => cmd.points.length < 3).length;
 
   console.log(`\n${frame.strokes.length} strokes -> ${polys.length} polygons, ${napRaw.length} bytes`);
   const split = polys.filter((p) => p.points.length === 3).length;
   console.log(`decoded ${decoded.length} polygons (${split} split for safety); malformed: ${wrongLength}, outside the frame: ${offFrame}`);
+  console.log(`tolerance ${epsilon.toFixed(4)}, ${coverRuns > 0 ? `${coverRuns} cover run(s)` : "no cover run"}`);
   console.log(`within the ${limit}-byte limit (${limitSource}): ${napRaw.length <= limit ? "yes" : "NO — too much to mint"}`);
 
   fs.mkdirSync(out, { recursive: true });
@@ -498,7 +526,7 @@ function draw({ out, encoder, limit, limitSource, strokes: strokeCount, toleranc
 /**
  * What survives when polygons go missing between here and the Pi.
  *
- * The overlap runs in toBrushQuads() are there on the premise that a stroke
+ * The overlap runs in toBrushShapes() are there on the premise that a stroke
  * covered twice keeps its shape when part of it is lost. This is that premise
  * measured: build a stroke at each pass count, throw polygons away, and see how
  * much of the intended paint is still on the canvas.
@@ -619,6 +647,70 @@ function loss(names, { encoder }) {
   }
 }
 
+/* ── inspect ───────────────────────────────────────────────────────────── */
+/**
+ * What a .nap file actually contains, for a drawing that came back wrong.
+ *
+ * Every check here was hand-rolled at least once while chasing polygons that
+ * went missing on the Pi, so it lives in the tool now rather than in a scratch
+ * file. Point it at a drawing captured on its way out (RPI_CAPTURE_DIR in
+ * app.js) and compare it with one of public/images, which are the files that
+ * have always played cleanly.
+ *
+ * The two columns that separate the browser from the Pi:
+ *
+ *  - a POLY whose operand bytes don't divide evenly by pointBytes is dropped
+ *    WHOLE by the Pi (Naplps.cpp, NapCmd::setPoints), where the browser keeps
+ *    what it could read -- chunks missing on one screen and not the other;
+ *  - a polygon that crosses itself fills differently under the nonzero rule a
+ *    canvas uses and the even-odd rule ofPath defaults to, and the Pi's
+ *    setPolyWindingMode(NONZERO) is currently commented out.
+ *
+ * @param {string[]} files - paths to .nap files
+ */
+function inspect(files) {
+  if (files.length === 0) {
+    throw new Error("inspect needs a file: brush-geometry inspect path/to/drawing.nap");
+  }
+
+  for (const file of files) {
+    const napRaw = fs.readFileSync(file, "latin1").replace(/[\r\n]/g, "");
+    const decoder = new (napContext({}).NapDecoder)([napRaw]);
+
+    const opcodes = new Map();
+    const perPoly = new Map();
+    let polys = 0;
+    let uneven = 0;
+    let offFrame = 0;
+    let folded = 0;
+
+    for (const cmd of decoder.cmds) {
+      const id = (cmd.opcode && cmd.opcode.id) || "(blank)";
+      opcodes.set(id, (opcodes.get(id) || 0) + 1);
+
+      for (const p of cmd.points || []) {
+        if (!(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1)) offFrame++;
+      }
+
+      if (!id.includes("POLY")) continue;
+      polys++;
+      perPoly.set(cmd.points.length, (perPoly.get(cmd.points.length) || 0) + 1);
+      if (cmd.pointBytes > 0 && cmd.data.length % cmd.pointBytes !== 0) uneven++;
+      if (selfIntersections(cmd.points) > 0) folded++;
+    }
+
+    const sizes = [...perPoly.keys()].sort((a, b) => a - b);
+    console.log(`\n## ${file}  (${napRaw.length} bytes, ${decoder.cmds.length} commands, ${polys} POLY)`);
+    for (const [id, n] of [...opcodes].sort((a, b) => b[1] - a[1])) {
+      console.log(`   ${String(n).padStart(6)}  ${id}`);
+    }
+    console.log(`   points per polygon: ${sizes.map((s) => `${s}:${perPoly.get(s)}`).join("  ") || "none"}`);
+    console.log(`   POLY with uneven operand bytes: ${uneven}${uneven ? "   <-- the Pi drops these whole" : ""}`);
+    console.log(`   decoded points outside the frame: ${offFrame}   (both renderers drop these)`);
+    console.log(`   decoded polygons that cross themselves: ${folded}${folded ? "   <-- nonzero and even-odd will differ" : ""}`);
+  }
+}
+
 /* ── cli ───────────────────────────────────────────────────────────────── */
 function main() {
   const { values, positionals } = parseArgs({
@@ -678,6 +770,9 @@ function main() {
         break;
       case "loss":
         loss(names, options);
+        break;
+      case "inspect":
+        inspect(names);
         break;
       default:
         console.error(`Unknown command: ${command}\n`);

@@ -1,5 +1,12 @@
 # NAPLPS drift in drawing mode
 
+> **Partly superseded.** The drift diagnosis and the rounding fix below stand.
+> The explanation for *pieces going missing* does not: this note attributes it to
+> decoded points leaving the unit square, where both renderers drop them. Measured
+> since, the `.nap` files that play cleanly on the Pi carry hundreds of off-frame
+> points (290, 503, 815 across three of them) and current drawing-mode output
+> carries none — while pieces still go missing. See `REPORT_2.md`.
+
 Drawings made in live drawing mode came back wrong: shapes offset from where they
 were drawn, worse toward the end of each stroke, and with pieces of the longer
 strokes simply missing. Files loaded from disk and drawings converted from SVG

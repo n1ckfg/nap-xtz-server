@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Controller } from './controller.js';
 import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
-import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
+import { Frame, BRUSH_SIMPLIFY, MIN_STEP, BRUSH_OVERLAP_PASSES } from './tools.js';
 import { Palette } from './palette.js';
 import { createVHSCPass } from '../shaders/vhsc-three.js';
 
@@ -57,8 +57,11 @@ function loadSizeLimit() {
 }
 
 // How many times convertToNAPLPS() may coarsen the brush to get under it.
-// Five doublings takes the tolerance from a couple of pixels to about twenty.
-const MAX_SIMPLIFY_PASSES = 5;
+// The ladder now starts at the encoder's own quantum rather than four times it,
+// so it needs three more rungs to reach the same place: eight doublings take the
+// tolerance from a third of a pixel to about forty, which covers the busiest
+// drawing the corpus has (a hundred strokes needed six of them).
+const MAX_SIMPLIFY_PASSES = 8;
 
 // Largest 4:3 box that fits the window ("contain"), plus its centering offset.
 function getDrawSize() {
@@ -1284,10 +1287,11 @@ function convertToNAPLPS() {
         .applyMatrix3(toStrokeSpace)
         .normalize();
 
-    // Every stroke's polygons at one simplification tolerance. Fresh Vector2s
-    // each time: NapEncoder flips a point's y in place as it encodes, so a
-    // second pass over the same objects would come out upside down.
-    const buildInput = (epsilon) => {
+    // Every stroke's polygons at one simplification tolerance and one number of
+    // cover runs. Fresh Vector2s each time: NapEncoder flips a point's y in
+    // place as it encodes, so a second pass over the same objects would come out
+    // upside down.
+    const buildInput = (epsilon, passes) => {
         const input = [];
 
         for (const stroke of frame.strokes) {
@@ -1300,9 +1304,9 @@ function convertToNAPLPS() {
             const b = hex & 0xff;
             const color = new window.Vector3(r, g, b);
 
-            // Quads along the stroke, triangles where a quad would be fragile:
-            // see toBrushPolygons()
-            for (const polygon of stroke.toBrushPolygons(project, widthAxis, epsilon)) {
+            // Trapezoids, corner fans and caps along the stroke, cut into
+            // triangles where one would be fragile: see toBrushPolygons()
+            for (const polygon of stroke.toBrushPolygons(project, widthAxis, epsilon, passes)) {
                 const points2D = polygon.map(p => new window.Vector2(p.x, p.y));
                 input.push(new window.NapInputWrapper(color, points2D, true));
             }
@@ -1310,12 +1314,25 @@ function convertToNAPLPS() {
         return input;
     };
 
-    // A drawing that won't fit the chain is redrawn with a coarser brush rather
-    // than handed over to be refused: the shape survives losing points far
-    // better than the drawing survives a mint that never happens. Detail is
-    // only given up when it has to be -- the first pass is the brush as tuned.
+    // Fidelity first, insurance second. The brush starts as fine as the format
+    // can carry and with no cover run at all; the ladder coarsens it only far
+    // enough to fit; whatever room is left then buys the cover runs back.
+    //
+    // It used to run the other way round -- every drawing paid for the cover run
+    // up front, and a busy one paid for it by having its centreline thinned
+    // until the polygons lost their shape. Measured against the ideal brush, the
+    // tolerance is worth ten to thirty points of fidelity where the cover run is
+    // worth none at all: it buys nothing unless a polygon actually goes missing.
+    // So the cover run is what gives way when a drawing is too big, not the
+    // shape of the strokes.
+    //
+    // Null until the backend's figure has come (see maxNaplpsBytes), and with no
+    // limit there is nothing to fit -- the canvas and the Pi will take whatever
+    // this produces, so it gets the finest brush and the cover run too.
+    const limit = maxNaplpsBytes;
+
     let epsilon = BRUSH_SIMPLIFY;
-    let input = buildInput(epsilon);
+    let input = buildInput(epsilon, 0);
 
     if (input.length === 0) {
         console.log('No valid strokes to encode');
@@ -1324,10 +1341,9 @@ function convertToNAPLPS() {
 
     let encoder = new window.NapEncoder(input);
 
-    // Null until the backend's figure has come (see maxNaplpsBytes), and with
-    // no limit there is nothing to fit.
-    const limit = maxNaplpsBytes;
-
+    // A drawing that won't fit the chain is redrawn with a coarser brush rather
+    // than handed over to be refused: the shape survives losing points far
+    // better than the drawing survives a mint that never happens.
     for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && limit !== null && encoder.napRaw.length > limit; pass++) {
         // Doubling alone can't leave zero, and zero is a brush tuned to keep
         // every point it was given. Step onto the encoder's own quantum first:
@@ -1337,11 +1353,27 @@ function convertToNAPLPS() {
         console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${limit} limit; ` +
                     `simplifying at ${epsilon.toFixed(4)}`);
 
-        const simpler = buildInput(epsilon);
+        const simpler = buildInput(epsilon, 0);
         if (simpler.length === 0) break; // nothing left to give: keep what we have
 
         input = simpler;
         encoder = new window.NapEncoder(input);
+    }
+
+    // Lay the stroke down more than once with what's left over, so a polygon
+    // lost on the way to the Pi leaves a covered gap rather than a notch. A
+    // drawing that only just fits goes without: a stroke of the right shape sent
+    // once beats a coarse one sent twice.
+    let coverRuns = 0;
+    if (BRUSH_OVERLAP_PASSES > 0 && (limit === null || encoder.napRaw.length <= limit)) {
+        const covered = buildInput(epsilon, BRUSH_OVERLAP_PASSES);
+        const coveredEncoder = covered.length > 0 ? new window.NapEncoder(covered) : null;
+
+        if (coveredEncoder && (limit === null || coveredEncoder.napRaw.length <= limit)) {
+            input = covered;
+            encoder = coveredEncoder;
+            coverRuns = BRUSH_OVERLAP_PASSES;
+        }
     }
 
     if (limit === null) {
@@ -1360,9 +1392,14 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
+    // The cover run is the part that gives way under pressure, so say whether it
+    // made it in: that is how to tell, from a real drawing rather than from the
+    // harness, whether the redundancy is still being bought.
     const split = input.filter(polygon => polygon.points.length === 3).length;
     console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons, ` +
-                `${split} split for safety) to ${encoder.napRaw.length} bytes of NAPLPS`);
+                `${split} split for safety) to ${encoder.napRaw.length} bytes of NAPLPS ` +
+                `at tolerance ${epsilon.toFixed(4)}, ` +
+                (coverRuns > 0 ? `${coverRuns} cover run(s)` : 'no cover run -- the budget went on detail'));
     return encoder.napRaw;
 }
 

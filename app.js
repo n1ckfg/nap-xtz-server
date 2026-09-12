@@ -607,10 +607,34 @@ function rpiNaplpsFrame(napRaw, source) {
     });
 }
 
+// Where to keep a copy of what goes to the Pi. Off unless RPI_CAPTURE_DIR is
+// set, and worth setting only while chasing a fault: when a drawing arrives on
+// the Pi with pieces missing, the one artifact worth analysing is the exact
+// byte stream that was sent. Every analysis so far has been run against a
+// stream the harness synthesised, which has come back clean on every measure --
+// so the next step is to read the real one.
+const RPI_CAPTURE_DIR = String(process.env.RPI_CAPTURE_DIR || "").trim();
+
+function captureNaplpsForRpi(napRaw, source) {
+    if (!RPI_CAPTURE_DIR) return;
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = path.join(RPI_CAPTURE_DIR, stamp + "_" + (source || "server") + ".nap");
+
+    // Written latin1, the encoding the drawing is carried in everywhere else,
+    // so the file is byte-for-byte what went down the socket.
+    fs.promises.mkdir(RPI_CAPTURE_DIR, { recursive: true })
+        .then(function() { return fs.promises.writeFile(file, napRaw, "latin1"); })
+        .then(function() { console.log("[rpi] captured " + file); })
+        .catch(function(err) { console.warn("[rpi] capture failed: " + err.message); });
+}
+
 // Every configured Pi gets the drawing. A Pi that is down is skipped rather
 // than holding up the others; it will show the next drawing once it is back.
 function sendNaplpsToRpi(napRaw, source) {
     if (!rpis.length) return false;
+
+    captureNaplpsForRpi(napRaw, source);
 
     const frame = rpiNaplpsFrame(napRaw, source);
     const sent = rpis.filter(function(rpi) { return rpi.send(frame); }).length;

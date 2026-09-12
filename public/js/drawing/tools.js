@@ -12,24 +12,47 @@ const FLICKER_INTERVAL = 50; // ms
 // doesn't start or stop with a flare.
 const TIP_RADIUS = 0.01;
 
-// The next three are in frame widths -- the 0..1 space toBrushQuads works in,
+// The next few are in frame widths -- the 0..1 space toBrushShapes works in,
 // where 1 is the whole drawing, so 0.005 is about three pixels of a 640-wide one.
-export const BRUSH_SIMPLIFY = 0.002; //0.005; // how far simplification may move a point
 export const MIN_STEP = 0.0005; // 1/2048: a shorter step is a rounding error to the encoder
-const MIN_RADIUS = 0.0005;    // keeps a quad from collapsing into a line
+const MIN_RADIUS = 0.0005;      // keeps a piece from collapsing into a line
 
-// How much room a quad needs before the encoder's rounding could fold it. Four
+// Where the byte ladder in convertToNAPLPS() starts, not where it settles: the
+// finest tolerance the format can carry, since a point the encoder cannot tell
+// from its neighbour is one simplification may as well drop. Fidelity is the
+// first call on the budget and the ladder coarsens from here only when a drawing
+// won't fit -- the other way round from thinning the brush to a fixed 0.002
+// before anyone had asked whether there was room for more.
+//
+// That thinning was costing far more than the polygon shapes ever did. Measured
+// against the ideal brush over the harness corpus, rebuilding the geometry
+// exactly is worth about two points of fidelity and the tolerance is worth ten
+// to thirty: a hairpin came back at 0.643 of the ideal at 0.002 and 0.965 here.
+export const BRUSH_SIMPLIFY = MIN_STEP;
+
+// How much room a piece needs before the encoder's rounding could fold it. Four
 // quanta is twice the worst fold measured over a stress corpus of strokes drawn
 // tiny, distant, and doubled back on themselves.
-const QUAD_SAFE_HEIGHT = 4 * MIN_STEP;
+const PIECE_SAFE_HEIGHT = 4 * MIN_STEP;
+
+// How far a join or cap arc may turn between points. At 45 degrees a half-turn
+// join costs five points and a cap four, and the corpus scores that level with
+// 30 degrees for fewer bytes -- an arc is the roundest thing a brush has and
+// also, at these radii, the least visible.
+const JOIN_ARC_STEP = Math.PI / 4;
 
 // How far inside the frame a clamped point is held. Each delta the encoder
-// writes can fall a quantum short of where it was asked for, and a quad is four
-// of them, so a point pinned to the very edge can decode just outside it -- and
-// both renderers drop a point that lands outside rather than pulling it back.
+// writes can fall half a quantum short of where it was asked for, and the
+// longest piece here is six of them -- a cap or a widest-turn fan, since
+// arcPoints() never spends more than four steps on a half turn -- so a point
+// pinned to the very edge can decode just outside it, and both renderers drop a
+// point that lands outside rather than pulling it back. Four quanta of margin
+// covers the three a six-point piece can lose; the "half off screen" check in
+// tools/brush-geometry asserts it over strokes leaving the frame in every
+// direction.
 const FRAME_MARGIN = 4 * MIN_STEP;
 
-// Extra runs of quads laid over the stroke, each offset along it by an even
+// Extra runs of pieces laid over the stroke, each offset along it by an even
 // fraction of a segment, so a polygon that goes missing on the way to the Pi
 // leaves a covered gap rather than a notch in the stroke. A staggered run's
 // joints fall where the plain run's segments are straight and its segments
@@ -37,9 +60,11 @@ const FRAME_MARGIN = 4 * MIN_STEP;
 // rather than the same one twice.
 //
 // 0 is the plain run. Each pass adds about as many polygons as the plain run
-// has, and the byte ladder in convertToNAPLPS() coarsens the brush if that puts
-// a drawing over the mint limit -- so redundancy is paid for in detail, not in
-// drawings that won't fit.
+// has, and convertToNAPLPS() only buys them once the centreline itself fits --
+// so this is what a busy drawing gives up, rather than the shape of its strokes.
+// It used to be the other way round: every drawing paid for the cover run first,
+// and a busy one paid for it by having its centreline thinned until the polygons
+// lost their shape.
 export const BRUSH_OVERLAP_PASSES = 1;
 
 /**
@@ -105,34 +130,60 @@ function simplifyPath(path, epsilon) {
 }
 
 /**
- * How far each quad has to reach past a corner to cover the wedge the next one
- * leaves there: radius * tan(half the turn), which is nothing on a straight run
- * and a whole radius at a right angle. Capped there, so a hairpin gets a blunt
- * corner instead of a spike.
- * @param {{x: number, y: number}[]} points - The simplified centreline
- * @param {number[]} radii
- * @returns {number[]} Reach at each point, ends included (and zero)
+ * Points along a circular arc, from one angle to another by the shorter way
+ * round, at no more than JOIN_ARC_STEP between them. Both ends are included, so
+ * an arc meets the straight edges either side of it exactly.
+ * @param {{x: number, y: number}} centre
+ * @param {number} radius
+ * @param {number} from - Angle in radians
+ * @param {number} to
+ * @returns {{x: number, y: number}[]}
  */
-function cornerReach(points, radii) {
-    const reach = points.map(() => 0);
+function arcPoints(centre, radius, from, to) {
+    let sweep = to - from;
+    while (sweep > Math.PI) sweep -= 2 * Math.PI;
+    while (sweep < -Math.PI) sweep += 2 * Math.PI;
 
-    for (let i = 1; i < points.length - 1; i++) {
-        const inX = points[i].x - points[i - 1].x;
-        const inY = points[i].y - points[i - 1].y;
-        const outX = points[i + 1].x - points[i].x;
-        const outY = points[i + 1].y - points[i].y;
-        const inLen = Math.hypot(inX, inY);
-        const outLen = Math.hypot(outX, outY);
-        if (inLen < MIN_STEP || outLen < MIN_STEP) continue;
+    // Never more points than the format can tell apart. An arc point closer to
+    // the one before it than the fold test's own margin carries no shape the
+    // encoder could keep, and costs four bytes to say so -- which is what turned
+    // a fan on a small radius into a dozen sub-pixel slivers.
+    const steps = Math.max(1, Math.min(
+        Math.ceil(Math.abs(sweep) / JOIN_ARC_STEP),
+        Math.floor((Math.abs(sweep) * radius) / PIECE_SAFE_HEIGHT)
+    ));
+    const points = [];
 
-        const dot = (inX * outX + inY * outY) / (inLen * outLen);
-        const cross = Math.abs(inX * outY - inY * outX) / (inLen * outLen);
-        const halfTurn = cross / Math.max(1e-6, 1 + dot); // tan(turn / 2)
-
-        reach[i] = Math.min(1, halfTurn) * Math.max(radii[i], MIN_RADIUS);
+    for (let i = 0; i <= steps; i++) {
+        const angle = from + (sweep * i) / steps;
+        points.push({
+            x: centre.x + Math.cos(angle) * radius,
+            y: centre.y + Math.sin(angle) * radius
+        });
     }
 
-    return reach;
+    return points;
+}
+
+/**
+ * A closed circle, for a stroke with no length to lay a trapezoid along.
+ * @param {{x: number, y: number}} centre
+ * @param {number} radius
+ * @returns {{x: number, y: number}[]}
+ */
+function discPoints(centre, radius) {
+    const steps = Math.max(4, Math.ceil((2 * Math.PI) / JOIN_ARC_STEP));
+    const points = [];
+
+    for (let i = 0; i < steps; i++) {
+        const angle = (i / steps) * 2 * Math.PI;
+        points.push({
+            x: centre.x + Math.cos(angle) * radius,
+            y: centre.y + Math.sin(angle) * radius
+        });
+    }
+
+    return points;
 }
 
 /**
@@ -191,53 +242,120 @@ function touchesFrame(poly) {
 }
 
 /**
- * One quad per segment of a centreline, each on its own segment's perpendicular
- * and reaching a little way into its neighbours so no gap shows at a turn. Both
- * the plain run and every staggered overlap run are built by this, so the two
- * are the same shape and differ only in where their joints fall.
+ * The brush laid down exactly, as a tiling of convex pieces: one trapezoid along
+ * each segment of a centreline, one fan filling the wedge left at each interior
+ * vertex, and a round cap at each end.
+ *
+ * This is a tiling where it used to be a covering. Consecutive quads reached
+ * past their shared joint far enough to hide the wedge between them, which
+ * fills a corner by painting over it -- close enough at a gentle turn, and
+ * visibly blunt at a sharp one. A fan fills the same wedge exactly for about
+ * the same bytes, because what it costs is the overlap it replaces.
+ *
+ * Every piece is convex, so no winding rule has an opinion about one, and every
+ * piece is short, so the encoder's running delta cursor is reset long before it
+ * can drift. Fans and caps carry their hub first, which is what lets
+ * toBrushPolygons() cut one into triangles if the encoder's rounding would
+ * leave it fragile.
+ *
+ * Both the plain run and every staggered overlap run are built by this, so the
+ * two are the same shape and differ only in where their joints fall.
+ *
  * @param {{x: number, y: number}[]} points
  * @param {number[]} radii
- * @returns {{x: number, y: number}[][]} Closed 4-point polygons, in drawing order
+ * @returns {{x: number, y: number}[][]} Closed convex polygons, in drawing order
  */
-function quadsAlong(points, radii) {
-    const lastSegment = points.length - 2;
-    const reach = cornerReach(points, radii);
-    const quads = [];
+function piecesAlong(points, radii) {
+    const lastPoint = points.length - 1;
+    const pieces = [];
 
-    for (let i = 0; i <= lastSegment; i++) {
-        const a = points[i];
-        const b = points[i + 1];
-        const length = Math.hypot(b.x - a.x, b.y - a.y);
-        if (length < MIN_STEP) continue;
+    // The encoder silently drops a point outside the frame, and every point
+    // after it in that polygon is a delta from the one dropped, so the rest of
+    // the shape lands somewhere else entirely. Keep the pieces that touch the
+    // frame and clamp them into it; skip the rest.
+    const add = (piece) => {
+        if (piece.length >= 3 && touchesFrame(piece)) pieces.push(piece.map(clampToFrame));
+    };
 
-        const tx = (b.x - a.x) / length;
-        const ty = (b.y - a.y) / length;
-        const ra = Math.max(radii[i], MIN_RADIUS);
-        const rb = Math.max(radii[i + 1], MIN_RADIUS);
-
-        // Reach into the neighbouring segments, but not past the run's own ends
-        const back = i > 0 ? reach[i] : 0;
-        const forward = i < lastSegment ? reach[i + 1] : 0;
-        const ax = a.x - tx * back;
-        const ay = a.y - ty * back;
-        const bx = b.x + tx * forward;
-        const by = b.y + ty * forward;
-
-        const quad = [
-            { x: ax - ty * ra, y: ay + tx * ra },
-            { x: bx - ty * rb, y: by + tx * rb },
-            { x: bx + ty * rb, y: by - tx * rb },
-            { x: ax + ty * ra, y: ay - tx * ra }
-        ];
-
-        // The encoder silently drops a point outside the frame, and every point
-        // after it in that polygon is a delta from the one dropped, so the rest
-        // of the shape lands somewhere else entirely. Keep the quads that touch
-        // the frame and clamp them into it; skip the rest.
-        if (touchesFrame(quad)) quads.push(quad.map(clampToFrame));
+    // Each segment's direction, and null where two points fall together
+    const tangents = [];
+    for (let i = 0; i < lastPoint; i++) {
+        const dx = points[i + 1].x - points[i].x;
+        const dy = points[i + 1].y - points[i].y;
+        const length = Math.hypot(dx, dy);
+        tangents.push(length < MIN_STEP ? null : { x: dx / length, y: dy / length });
     }
 
-    return quads;
+    const radiusAt = (i) => Math.max(radii[i], MIN_RADIUS);
+
+    // One trapezoid along each segment, on that segment's own perpendicular
+    for (let i = 0; i < lastPoint; i++) {
+        const t = tangents[i];
+        if (!t) continue;
+
+        const a = points[i];
+        const b = points[i + 1];
+        const ra = radiusAt(i);
+        const rb = radiusAt(i + 1);
+
+        add([
+            { x: a.x - t.y * ra, y: a.y + t.x * ra },
+            { x: b.x - t.y * rb, y: b.y + t.x * rb },
+            { x: b.x + t.y * rb, y: b.y - t.x * rb },
+            { x: a.x + t.y * ra, y: a.y - t.x * ra }
+        ]);
+    }
+
+    // A fan over the wedge on the outside of each turn -- the side the two
+    // segments open away from, which is the only side that leaves a gap
+    for (let i = 1; i < lastPoint; i++) {
+        const into = tangents[i - 1];
+        const outOf = tangents[i];
+        if (!into || !outOf) continue;
+
+        const cross = into.x * outOf.y - into.y * outOf.x;
+        const turn = Math.atan2(cross, into.x * outOf.x + into.y * outOf.y);
+        const radius = radiusAt(i);
+
+        // How far the wedge reaches past the two trapezoid edges that meet here
+        // -- the sagitta of the arc across it. Below a quantum the two corners
+        // round to the same coordinate, so there is nothing there to fill and a
+        // fan would be a polygon's worth of bytes spent on nothing. A brush
+        // thinner than the fold test's margin has no room for a corner at all.
+        //
+        // This is most of what a fine tolerance costs. A centreline simplified
+        // near the encoder's own quantum turns by a degree or two at nearly
+        // every vertex, and a fan at each of those doubled the polygon count to
+        // fill gaps that cannot be represented. Where the turn is sharp enough
+        // to leave a visible wedge -- about 30 degrees at a typical brush width
+        // -- the fan is still exact, which is the case the old corner reach was
+        // getting visibly blunt.
+        if (radius < PIECE_SAFE_HEIGHT) continue;
+        if (radius * (1 - Math.cos(turn / 2)) < MIN_STEP) continue;
+
+        const side = cross > 0 ? -1 : 1;
+        add([points[i], ...arcPoints(points[i], radius,
+                                     Math.atan2(side * into.x, -side * into.y),
+                                     Math.atan2(side * outOf.x, -side * outOf.y))]);
+    }
+
+    // A round cap at each end, so a stroke starts and stops where the hand did
+    // rather than on the flat edge of its first and last trapezoid. A tip
+    // pinched thinner than the fold test's margin sits inside the rounding of
+    // that trapezoid, so there is nothing left there to round off.
+    const firstTangent = tangents.find((t) => t);
+    const lastTangent = tangents.reduce((found, t) => t || found, null);
+
+    if (firstTangent && radiusAt(0) >= PIECE_SAFE_HEIGHT) {
+        const angle = Math.atan2(firstTangent.x, -firstTangent.y);
+        add([points[0], ...arcPoints(points[0], radiusAt(0), angle, angle + Math.PI)]);
+    }
+    if (lastTangent && radiusAt(lastPoint) >= PIECE_SAFE_HEIGHT) {
+        const angle = Math.atan2(-lastTangent.x, lastTangent.y);
+        add([points[lastPoint], ...arcPoints(points[lastPoint], radiusAt(lastPoint), angle, angle + Math.PI)]);
+    }
+
+    return pieces;
 }
 
 /**
@@ -290,6 +408,7 @@ export class Stroke {
         this.pressures = [];   // Pressure values per point (0-1)
         this.taperPower = 0.4; // Taper exponent for ends
         this.minThickness = 0.3; // Minimum thickness multiplier
+        this.normalOffset = 0; // 3D preview only -- see offsetAlongNormal()
     }
 
     /**
@@ -442,16 +561,29 @@ export class Stroke {
     }
 
     /**
-     * Offsets all points along the stroke's normal by a given amount
+     * Records how far the 3D preview should stand this stroke off along its own
+     * normal, so two strokes drawn in the same place don't z-fight on screen.
+     *
+     * It is deliberately not applied to the points. Moving them moved the
+     * encoded drawing too, and by a distance that grows with every stroke added
+     * -- measured over the harness corpus at 3.4px by the fortieth stroke and
+     * 16.7px by the eightieth, on an artwork 640 across. The polyline is what
+     * the hand drew and what NAPLPS is regenerated from; a trick for the depth
+     * buffer belongs on the mesh, where Frame._refreshGeometry() now puts it.
+     *
      * @param {number} amount - Distance to offset
      */
     offsetAlongNormal(amount) {
-        if (this.points.length < 3 || amount === 0) return;
+        this.normalOffset = amount;
+    }
 
-        const normal = this.computeNormal();
-        for (const point of this.points) {
-            point.addScaledVector(normal, amount);
-        }
+    /**
+     * Where the 3D preview mesh sits to keep clear of the strokes under it.
+     * @returns {THREE.Vector3} Zero unless offsetAlongNormal() asked for more
+     */
+    previewOffset() {
+        if (!this.normalOffset || this.points.length < 3) return new THREE.Vector3();
+        return this.computeNormal().multiplyScalar(this.normalOffset);
     }
 
     /**
@@ -629,18 +761,21 @@ export class Stroke {
     }
 
     /**
-     * The stroke as a run of quads -- one per segment of the simplified
-     * centreline -- in the 0..1 space NAPLPS draws in.
+     * The stroke as the exact tiling of convex pieces described by
+     * piecesAlong(), in the 0..1 space NAPLPS draws in.
      *
-     * A quad built on one segment's own perpendicular is convex, where a single
-     * long outline of the whole stroke crosses itself at every tight turn and
-     * fills differently on every renderer. Consecutive quads reach a little way
-     * into each other -- see cornerReach() -- so no gap shows at a turn.
+     * The centreline is projected first and the pieces are regenerated from the
+     * 2D points, so what is laid down is the shape as seen rather than a 3D
+     * shape flattened afterwards. A piece built on one segment's own
+     * perpendicular is convex, where a single long outline of the whole stroke
+     * crosses itself at every tight turn and fills differently on every
+     * renderer.
      *
      * `passes` staggered runs follow the plain one, offset half a segment along
      * the stroke, so every part of it is covered by more than one polygon and a
-     * polygon lost on the way to the Pi leaves paint behind it. See
-     * BRUSH_OVERLAP_PASSES.
+     * polygon lost on the way to the Pi leaves paint behind it. They are the
+     * second call on the byte budget, not the first: convertToNAPLPS() fits the
+     * centreline before it asks for these. See BRUSH_OVERLAP_PASSES.
      *
      * This is the shape; toBrushPolygons() is what gets encoded.
      *
@@ -649,43 +784,36 @@ export class Stroke {
      * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
      * @param {number} [passes=BRUSH_OVERLAP_PASSES] - staggered overlap runs to lay
      *     over the plain one, each covering the joints of the last
-     * @returns {{x: number, y: number}[][]} Closed 4-point polygons, in drawing order
+     * @returns {{x: number, y: number}[][]} Closed convex polygons, in drawing order
      */
-    toBrushQuads(project, widthAxis, epsilon = BRUSH_SIMPLIFY, passes = BRUSH_OVERLAP_PASSES) {
+    toBrushShapes(project, widthAxis, epsilon = BRUSH_SIMPLIFY, passes = BRUSH_OVERLAP_PASSES) {
         if (this.points.length < 2) return [];
 
         const { points, radii } = simplifyPath(this.toScreenPath(project, widthAxis), epsilon);
-        const quads = quadsAlong(points, radii);
+        const pieces = piecesAlong(points, radii);
 
         // Each staggered run is laid down after the whole plain run rather than
-        // beside the quads it covers, so a loss that takes a contiguous stretch
+        // beside the pieces it covers, so a loss that takes a contiguous stretch
         // of the stream still leaves the cover for it further along.
         for (let pass = 1; pass <= passes && points.length >= 2; pass++) {
             const stagger = staggerPath(points, radii, pass / (passes + 1));
-            quads.push(...quadsAlong(stagger.points, stagger.radii));
+            pieces.push(...piecesAlong(stagger.points, stagger.radii));
         }
 
         // A stroke can land on a single spot -- drawn straight at the camera, or
         // held still. There was paint on it, so leave a dab rather than nothing.
-        if (quads.length === 0 && points.length > 0) {
-            const r = Math.max(...radii, MIN_RADIUS);
-            const c = points[0];
-            const dab = [
-                { x: c.x - r, y: c.y - r },
-                { x: c.x + r, y: c.y - r },
-                { x: c.x + r, y: c.y + r },
-                { x: c.x - r, y: c.y + r }
-            ];
-            if (touchesFrame(dab)) quads.push(dab.map(clampToFrame));
+        if (pieces.length === 0 && points.length > 0) {
+            const dab = discPoints(points[0], Math.max(...radii, MIN_RADIUS));
+            if (touchesFrame(dab)) pieces.push(dab.map(clampToFrame));
         }
 
-        return quads;
+        return pieces;
     }
 
     /**
-     * The stroke as the filled polygons that get encoded: the quads above, and
-     * two triangles in place of any quad thin enough that the encoder could fold
-     * it over itself.
+     * The stroke as the filled polygons that get encoded: the pieces above, and
+     * two triangles in place of any trapezoid thin enough that the encoder could
+     * fold it over itself.
      *
      * The distinction earns its keep because the two renderers disagree about a
      * folded quad, and only about that. A bowtie fills its crossing region under
@@ -705,16 +833,27 @@ export class Stroke {
      * @param {number} [epsilon=BRUSH_SIMPLIFY] - how far simplification may move a point
      * @param {number} [passes=BRUSH_OVERLAP_PASSES] - staggered overlap runs to lay
      *     over the plain one, each covering the joints of the last
-     * @returns {{x: number, y: number}[][]} Closed polygons of three or four points, in drawing order
+     * @returns {{x: number, y: number}[][]} Closed polygons, none of them foldable, in drawing order
      */
     toBrushPolygons(project, widthAxis, epsilon = BRUSH_SIMPLIFY, passes = BRUSH_OVERLAP_PASSES) {
         const polygons = [];
 
-        for (const quad of this.toBrushQuads(project, widthAxis, epsilon, passes)) {
-            if (cornerHeight(quad) >= QUAD_SAFE_HEIGHT) {
-                polygons.push(quad);
+        for (const piece of this.toBrushShapes(project, widthAxis, epsilon, passes)) {
+            // Only a trapezoid can fold. What crosses is its pair of long edges,
+            // once rounding has pinched the shape thinner than a couple of
+            // quanta, and cornerHeight() measures precisely that room.
+            //
+            // A fan or a cap is convex around a hub, carries a radius of at
+            // least PIECE_SAFE_HEIGHT and keeps its points that far apart along
+            // the arc, so rounding can dent one but not turn it inside out.
+            // Measuring them with cornerHeight() split nearly every one, because
+            // an arc point is *meant* to sit close to the chord through its
+            // neighbours -- that is what roundness is, and reading it as
+            // fragility cost three polygons in four.
+            if (piece.length === 4 && cornerHeight(piece) < PIECE_SAFE_HEIGHT) {
+                polygons.push(...splitQuad(piece));
             } else {
-                polygons.push(...splitQuad(quad));
+                polygons.push(piece);
             }
         }
 
@@ -876,6 +1015,9 @@ export class Frame extends THREE.Group {
                 });
                 const brushMesh = new THREE.Mesh(brushGeo, brushMat);
                 brushMesh.frustumCulled = false;
+                // The z-offset that keeps strokes from z-fighting lives here
+                // rather than in the points -- see Stroke.offsetAlongNormal()
+                brushMesh.position.copy(stroke.previewOffset());
                 this.add(brushMesh);
                 this._fillMeshes.push(brushMesh);
             }
