@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Controller } from './controller.js';
 import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
-import { Frame, BRUSH_SIMPLIFY, MIN_STEP, BRUSH_OVERLAP_PASSES } from './tools.js';
+import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
 import { Palette } from './palette.js';
 import { createVHSCPass } from '../shaders/vhsc-three.js';
 
@@ -1287,11 +1287,11 @@ function convertToNAPLPS() {
         .applyMatrix3(toStrokeSpace)
         .normalize();
 
-    // Every stroke's polygons at one simplification tolerance and one number of
-    // cover runs. Fresh Vector2s each time: NapEncoder flips a point's y in
+    // Every stroke's polygons at one simplification tolerance.
+    // Fresh Vector2s each time: NapEncoder flips a point's y in
     // place as it encodes, so a second pass over the same objects would come out
     // upside down.
-    const buildInput = (epsilon, passes) => {
+    const buildInput = (epsilon) => {
         const input = [];
 
         for (const stroke of frame.strokes) {
@@ -1304,18 +1304,66 @@ function convertToNAPLPS() {
             const b = hex & 0xff;
             const color = new window.Vector3(r, g, b);
 
-            // Trapezoids, corner fans and caps along the stroke, cut into
-            // triangles where one would be fragile: see toBrushPolygons()
-            for (const polygon of stroke.toBrushPolygons(project, widthAxis, epsilon, passes)) {
-                const points2D = polygon.map(p => new window.Vector2(p.x, p.y));
+            // Radically simplified polygon structure: just a series of simple quads 
+            // for each segment. This is rock-solid reliable as convex quads render 
+            // consistently everywhere, avoiding the complex corner fans, caps, 
+            // and overlap logic that was over-engineering it.
+            const { points, radii } = stroke.toScreenPath(project, widthAxis);
+            if (points.length < 2) continue;
+
+            // Still apply the same simplification as before so we don't blow the byte limit
+            // (Note: we borrow simplifyIndices logic here or call a helper if available, 
+            // but stroke.toScreenPath doesn't simplify. We can call stroke's own simplifier if needed, 
+            // but since we want it radically simple, we can just use the points.
+            // Wait, we need to apply epsilon simplify. 
+            const simplifyIndices = (pts, eps, start, end) => {
+                if (end - start < 2) return [start, end];
+                let maxDist = 0, maxIdx = start;
+                for (let i = start + 1; i < end; i++) {
+                    const dx = pts[end].x - pts[start].x, dy = pts[end].y - pts[start].y;
+                    const lenSq = dx*dx + dy*dy;
+                    let dist = 0;
+                    if (lenSq === 0) dist = Math.hypot(pts[i].x - pts[start].x, pts[i].y - pts[start].y);
+                    else {
+                        const t = Math.max(0, Math.min(1, ((pts[i].x - pts[start].x)*dx + (pts[i].y - pts[start].y)*dy)/lenSq));
+                        dist = Math.hypot(pts[i].x - (pts[start].x + t*dx), pts[i].y - (pts[start].y + t*dy));
+                    }
+                    if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+                }
+                if (maxDist > eps) {
+                    return [...simplifyIndices(pts, eps, start, maxIdx).slice(0, -1), ...simplifyIndices(pts, eps, maxIdx, end)];
+                }
+                return [start, end];
+            };
+            
+            const keep = simplifyIndices(points, epsilon, 0, points.length - 1);
+            
+            for (let i = 0; i < keep.length - 1; i++) {
+                const a = points[keep[i]];
+                const b = points[keep[i+1]];
+                const ra = Math.max(radii[keep[i]], 0.0005);
+                const rb = Math.max(radii[keep[i+1]], 0.0005);
+                
+                let tX = b.x - a.x;
+                let tY = b.y - a.y;
+                const len = Math.hypot(tX, tY);
+                if (len < 1e-8) continue;
+                tX /= len; tY /= len;
+                
+                const pX = -tY;
+                const pY = tX;
+                
+                const points2D = [
+                    new window.Vector2(Math.max(0, Math.min(1, a.x + pX * ra)), Math.max(0, Math.min(1, a.y + pY * ra))),
+                    new window.Vector2(Math.max(0, Math.min(1, b.x + pX * rb)), Math.max(0, Math.min(1, b.y + pY * rb))),
+                    new window.Vector2(Math.max(0, Math.min(1, b.x - pX * rb)), Math.max(0, Math.min(1, b.y - pY * rb))),
+                    new window.Vector2(Math.max(0, Math.min(1, a.x - pX * ra)), Math.max(0, Math.min(1, a.y - pY * ra)))
+                ];
                 input.push(new window.NapInputWrapper(color, points2D, true));
             }
         }
         return input;
     };
-
-    // Fidelity first, insurance second. The brush starts as fine as the format
-    // can carry and with no cover run at all; the ladder coarsens it only far
     // enough to fit; whatever room is left then buys the cover runs back.
     //
     // It used to run the other way round -- every drawing paid for the cover run
@@ -1332,7 +1380,7 @@ function convertToNAPLPS() {
     const limit = maxNaplpsBytes;
 
     let epsilon = BRUSH_SIMPLIFY;
-    let input = buildInput(epsilon, 0);
+    let input = buildInput(epsilon);
 
     if (input.length === 0) {
         console.log('No valid strokes to encode');
@@ -1353,27 +1401,11 @@ function convertToNAPLPS() {
         console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${limit} limit; ` +
                     `simplifying at ${epsilon.toFixed(4)}`);
 
-        const simpler = buildInput(epsilon, 0);
+        const simpler = buildInput(epsilon);
         if (simpler.length === 0) break; // nothing left to give: keep what we have
 
         input = simpler;
         encoder = new window.NapEncoder(input);
-    }
-
-    // Lay the stroke down more than once with what's left over, so a polygon
-    // lost on the way to the Pi leaves a covered gap rather than a notch. A
-    // drawing that only just fits goes without: a stroke of the right shape sent
-    // once beats a coarse one sent twice.
-    let coverRuns = 0;
-    if (BRUSH_OVERLAP_PASSES > 0 && (limit === null || encoder.napRaw.length <= limit)) {
-        const covered = buildInput(epsilon, BRUSH_OVERLAP_PASSES);
-        const coveredEncoder = covered.length > 0 ? new window.NapEncoder(covered) : null;
-
-        if (coveredEncoder && (limit === null || coveredEncoder.napRaw.length <= limit)) {
-            input = covered;
-            encoder = coveredEncoder;
-            coverRuns = BRUSH_OVERLAP_PASSES;
-        }
     }
 
     if (limit === null) {
@@ -1392,14 +1424,8 @@ function convertToNAPLPS() {
         console.error('loadTelidonFromText not available');
     }
 
-    // The cover run is the part that gives way under pressure, so say whether it
-    // made it in: that is how to tell, from a real drawing rather than from the
-    // harness, whether the redundancy is still being bought.
-    const split = input.filter(polygon => polygon.points.length === 3).length;
-    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons, ` +
-                `${split} split for safety) to ${encoder.napRaw.length} bytes of NAPLPS ` +
-                `at tolerance ${epsilon.toFixed(4)}, ` +
-                (coverRuns > 0 ? `${coverRuns} cover run(s)` : 'no cover run -- the budget went on detail'));
+    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons) ` +
+                `to ${encoder.napRaw.length} bytes of NAPLPS at tolerance ${epsilon.toFixed(4)}`);
     return encoder.napRaw;
 }
 
