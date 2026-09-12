@@ -183,7 +183,7 @@
 				document.getElementById("clear").addEventListener("click", function() {
                     telidon = [];
 				    stopSlideshow();
-				    if (window.armDelete) window.armDelete();
+				    //if (window.armDelete) window.armDelete();
 				    loop(); // redraw once to show the placeholder, then idle
 			    });
 
@@ -816,17 +816,20 @@
 			}
 
 			function exitDrawingMode() {
-				stopDrawingMode();
+				const hadDrawing = stopDrawingMode();
 				NapClient.setDrawingMode(false); // the Pi stays on whichever drawing the cycle sent last
 				drawingContainer.classList.remove('active');
 				liveDrawingActive = false;
 				loop(); // refresh the main canvas (handles exit with no strokes drawn)
-				// Review mode opens on the newest token rather than on the empty
-				// canvas drawing mode left behind -- and that is where the arrow keys
-				// start reading. The Pi is left alone: it has had every mint from the
-				// watcher already, so this is a screen returning to rest, not a
-				// decision to change what the Pi is showing.
-				loadLatestToken();
+				if (!hadDrawing) {
+					// No strokes — fall back to the newest token so review mode
+					// opens on something, and the arrow keys start from the latest.
+					loadLatestToken();
+				}
+				// When there were strokes, convertToNAPLPS() already loaded them
+				// into the canvas via loadTelidonFromText, ready to mint.  The
+				// drawing is replaced by whatever the user does next in review
+				// mode (slideshow, latest, arrow keys, drag-and-drop, etc.).
 			}
 
 			document.getElementById('btn-live-drawing').addEventListener('click', enterDrawingMode);

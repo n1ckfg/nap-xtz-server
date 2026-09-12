@@ -1226,8 +1226,10 @@ export function stopDrawingMode() {
         animationFrameId = null;
     }
 
-    // Convert drawing to NAPLPS before stopping
-    convertToNAPLPS();
+    // Convert drawing to NAPLPS before stopping; returns the bytes, or
+    // null when there were no strokes — the caller uses this to decide
+    // whether to load a chain token instead.
+    const hadDrawing = convertToNAPLPS() !== null;
 
     // Disable mouse controller
     if (mouseController) {
@@ -1250,6 +1252,8 @@ export function stopDrawingMode() {
     labels.forEach(label => {
         if (label.container) label.container.style.display = 'none';
     });
+
+    return hadDrawing;
 }
 
 // Encodes the current frame to NAPLPS and loads it into the main canvas.
