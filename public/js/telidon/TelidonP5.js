@@ -51,7 +51,9 @@ class TelidonDrawCmd {
         this.thickness = 1;
         this.text = "";
         this.markTime = 0;
-        this.progressiveDrawInterval = 66;
+        // * * * * * * * * * 
+        this.progressiveDrawInterval = 25;//66;
+        // * * * * * * * * * 
         this.extraLoopCounter = 0;
 
         this.points = [];

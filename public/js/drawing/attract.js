@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 
 const ATTRACT_ID = 'attract';
-const POINT_INTERVAL = 50;
-const STROKE_PAUSE = 500;
-const DRAWING_PAUSE = 2000;
+const POINT_INTERVAL = 25;
+const STROKE_PAUSE = 250;
+const DRAWING_PAUSE = 1000;
 const Z_STEP = 0.03;
 
 export class AttractMode {
