@@ -84,6 +84,7 @@ const PALETTE_FLICKER_DURATION = 300; // 0.3 seconds
 let palettes = [];
 let paletteGripStartTime = []; // When grip started for each controller
 let paletteVisible = []; // Whether palette is visible for each controller
+let paletteSpawned = []; // Whether palette position has been set during flicker preview
 let paletteSpawnPos = []; // Where palette spawned
 let paletteLines = []; // Line from palette center to controller
 let paletteFlickerStart = []; // When color selection flicker started
@@ -272,6 +273,7 @@ function initThreeJS() {
         palettes.push(palette);
         paletteGripStartTime.push(null);
         paletteVisible.push(false);
+        paletteSpawned.push(false);
         paletteSpawnPos.push(new THREE.Vector3());
         paletteFlickerStart.push(null);
         paletteFlickerIndex.push(-1);
@@ -785,24 +787,28 @@ function animateLoop() {
             }
 
             const gripElapsed = now - paletteGripStartTime[i];
+            const halfDuration = PALETTE_HOLD_DURATION / 1.33; //2;
 
-            // After 2 seconds, show palette
-            if (gripElapsed >= PALETTE_HOLD_DURATION && !paletteVisible[i]) {
-                // Only show palette if it's a single grip (not both controllers)
+            // Flicker preview at 50%, fully visible at 100%
+            if (gripElapsed >= halfDuration && !paletteVisible[i]) {
                 const otherGrip = controllers[(i + 1) % MAX_HANDS].grip_Held;
                 if (!otherGrip) {
-                    paletteVisible[i] = true;
-                    palette.visible = true;
-                    paletteLine.visible = true;
+                    if (!paletteSpawned[i]) {
+                        const pos = _drawPos;
+                        controller.getWorldPosition(pos);
+                        paletteSpawnPos[i].copy(pos);
+                        palette.position.copy(pos);
+                        palette.lookAt(camera.position);
+                        paletteSpawned[i] = true;
+                    }
 
-                    // Spawn at controller's current position
-                    const pos = _drawPos;
-                    controller.getWorldPosition(pos);
-                    paletteSpawnPos[i].copy(pos);
-                    palette.position.copy(pos);
-
-                    // Face the camera
-                    palette.lookAt(camera.position);
+                    if (gripElapsed < PALETTE_HOLD_DURATION) {
+                        palette.visible = Math.floor(now / 50) % 2 === 0;
+                    } else {
+                        paletteVisible[i] = true;
+                        palette.visible = true;
+                        paletteLine.visible = true;
+                    }
                 }
             }
 
@@ -836,10 +842,11 @@ function animateLoop() {
             }
         } else {
             // Grip released - hide palette
-            if (paletteVisible[i] && paletteFlickerStart[i] === null) {
+            if ((paletteVisible[i] || paletteSpawned[i]) && paletteFlickerStart[i] === null) {
                 palette.visible = false;
                 paletteLine.visible = false;
                 paletteVisible[i] = false;
+                paletteSpawned[i] = false;
                 // Restore all swatch visibility
                 for (const swatch of palette.swatches) {
                     swatch.visible = true;
