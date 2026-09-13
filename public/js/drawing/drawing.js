@@ -5,6 +5,7 @@ import { OpenXR_WorldScale } from './worldscale.js';
 import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
 import { Palette } from './palette.js';
 import { createVHSCPass } from '../shaders/vhsc-three.js';
+import { AttractMode } from './attract.js';
 
 let gestureRecognizer;
 let video;
@@ -23,6 +24,7 @@ let worldScale;
 let frame;
 let vhscPass = null;
 let _armDelete = false;
+let attractMode = null;
 
 const MAX_HANDS = 2;
 
@@ -309,6 +311,8 @@ function initThreeJS() {
     // Initialize the world scale logic with our two controllers and the world group
     worldScale = new OpenXR_WorldScale(controllers[0], controllers[1], worldNode);
     frame = new Frame(worldNode);
+
+    attractMode = new AttractMode(frame, worldNode, resetCamera);
 
     // Initialize mouse controller
     mouseController = new MouseController();
@@ -630,6 +634,17 @@ function animateLoop() {
         controllers[i].updateButtonC(false);
     }
 
+    // Interrupt attract mode if a user starts drawing
+    if (attractMode) {
+        const userStarting =
+            controllers.some(c => c.trigger_Down) ||
+            (mouseController && !mousePaletteVisible && mouseController.trigger_Down);
+        if (userStarting) {
+            if (attractMode.active) attractMode.interrupt();
+            attractMode.resetTimer();
+        }
+    }
+
     // Drawing logic - each controller can draw independently
     // Uses drawing position (50% smoothing - more responsive)
     for (let i = 0; i < MAX_HANDS; i++) {
@@ -646,10 +661,12 @@ function animateLoop() {
             const pos = _drawPos;
             controller.getDrawPosition(pos);
             frame.continueStroke(pos, i);
+            if (attractMode) attractMode.resetTimer();
         }
         // End stroke on trigger_Up
         else if (controller.trigger_Up) {
             frame.endStroke(i);
+            if (attractMode) attractMode.resetTimer();
         }
     }
 
@@ -709,8 +726,10 @@ function animateLoop() {
                 const pos = _drawPos;
                 mouseController.getDrawPosition(pos);
                 frame.continueStroke(pos, MOUSE_CONTROLLER_ID);
+                if (attractMode) attractMode.resetTimer();
             } else if (mouseController.trigger_Up) {
                 frame.endStroke(MOUSE_CONTROLLER_ID);
+                if (attractMode) attractMode.resetTimer();
             }
         }
     }
@@ -1106,6 +1125,9 @@ function animateLoop() {
         }
     }
 
+    // Attract mode: draw random NAPLPS files when idle
+    if (attractMode) attractMode.update();
+
     // Two-pass render: scene → offscreen target, then VHSC shader → screen.
     if (vhscPass) {
         renderer.setRenderTarget(vhscPass.renderTarget);
@@ -1197,6 +1219,8 @@ export async function startDrawingMode(container) {
 
     drawingStatusEl = container.querySelector('#drawing-status') || document.getElementById('drawing-status');
     hideDrawingStatus(); // whatever the last session ended on shouldn't greet this one
+
+    if (attractMode) attractMode.resetTimer();
 
     // Start rendering before the async setup so the scene is visible
     // immediately — the animate loop guards on gestureRecognizer/results,
