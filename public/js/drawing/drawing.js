@@ -746,16 +746,37 @@ function animateLoop() {
 
         // Drawing with mouse (only when palette not active)
         if (!mousePaletteVisible) {
-            if (mouseController.trigger_Down) {
-                const pos = _drawPos;
-                mouseController.getDrawPosition(pos);
-                frame.beginStroke(pos, MOUSE_CONTROLLER_ID, mouseDrawColor);
-            } else if (mouseController.trigger_Held && frame.hasActiveStroke(MOUSE_CONTROLLER_ID)) {
-                const pos = _drawPos;
-                mouseController.getDrawPosition(pos);
-                frame.continueStroke(pos, MOUSE_CONTROLLER_ID);
-            } else if (mouseController.trigger_Up) {
-                frame.endStroke(MOUSE_CONTROLLER_ID);
+            const mouseVId = 'v_mouse';
+            const spaceHeld = !!keysPressed[' '];
+
+            if (spaceHeld) {
+                // Space held: left click draws closed filled polygons
+                if (mouseController.trigger_Down) {
+                    const pos = _drawPos;
+                    mouseController.getDrawPosition(pos);
+                    const stroke = frame.beginStroke(pos, mouseVId, mouseDrawColor);
+                    stroke.closed = true;
+                } else if (mouseController.trigger_Held && frame.hasActiveStroke(mouseVId)) {
+                    const pos = _drawPos;
+                    mouseController.getDrawPosition(pos);
+                    frame.continueStroke(pos, mouseVId);
+                } else if (mouseController.trigger_Up) {
+                    frame.endStroke(mouseVId);
+                }
+            } else {
+                // No space: normal brush strokes
+                if (frame.hasActiveStroke(mouseVId)) frame.endStroke(mouseVId);
+                if (mouseController.trigger_Down) {
+                    const pos = _drawPos;
+                    mouseController.getDrawPosition(pos);
+                    frame.beginStroke(pos, MOUSE_CONTROLLER_ID, mouseDrawColor);
+                } else if (mouseController.trigger_Held && frame.hasActiveStroke(MOUSE_CONTROLLER_ID)) {
+                    const pos = _drawPos;
+                    mouseController.getDrawPosition(pos);
+                    frame.continueStroke(pos, MOUSE_CONTROLLER_ID);
+                } else if (mouseController.trigger_Up) {
+                    frame.endStroke(MOUSE_CONTROLLER_ID);
+                }
             }
         }
     }
