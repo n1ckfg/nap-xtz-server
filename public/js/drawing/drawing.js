@@ -465,7 +465,8 @@ function resetCamera() {
 }
 
 function updateKeyboardNavigation() {
-    if (!keysPressed['w'] && !keysPressed['a'] && !keysPressed['s'] && !keysPressed['d']) {
+    if (!keysPressed['w'] && !keysPressed['a'] && !keysPressed['s'] && !keysPressed['d'] &&
+        !keysPressed['q'] && !keysPressed['e']) {
         return;
     }
 
@@ -484,6 +485,8 @@ function updateKeyboardNavigation() {
     if (keysPressed['s']) movement.addScaledVector(forward, -moveSpeed);
     if (keysPressed['a']) movement.addScaledVector(right, -moveSpeed);
     if (keysPressed['d']) movement.addScaledVector(right, moveSpeed);
+    if (keysPressed['q']) movement.y -= moveSpeed;
+    if (keysPressed['e']) movement.y += moveSpeed;
 
     cameraTarget.add(movement);
     updateCameraFromSpherical();
