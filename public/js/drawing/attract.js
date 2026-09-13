@@ -4,6 +4,7 @@ const ATTRACT_ID = 'attract';
 const POINT_INTERVAL = 50;
 const STROKE_PAUSE = 500;
 const DRAWING_PAUSE = 2000;
+const Z_STEP = 0.03;
 
 export class AttractMode {
     constructor(frame, worldNode, resetCameraFn) {
@@ -164,7 +165,7 @@ export class AttractMode {
 
                 const wx = (cx - 0.5) * 2 * halfW;
                 const wy = (cy - 0.5) * 2 * halfH;
-                centerline.push(new THREE.Vector3(wx, wy, 0));
+                centerline.push(new THREE.Vector3(wx, wy, strokes.length * Z_STEP));
             }
 
             const padded = centerline.length < 12

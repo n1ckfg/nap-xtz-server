@@ -634,15 +634,20 @@ function animateLoop() {
         controllers[i].updateButtonC(false);
     }
 
-    // Interrupt attract mode if a user starts drawing
+    // Interrupt attract mode on any user gesture
     if (attractMode) {
-        const userStarting =
-            controllers.some(c => c.trigger_Down) ||
-            (mouseController && !mousePaletteVisible && mouseController.trigger_Down);
-        if (userStarting) {
+        const anyDown = controllers.some(c =>
+            c.trigger_Down || c.grip_Down || c.buttonA_Down || c.buttonB_Down || c.buttonC_Down
+        ) || (mouseController && mouseController.trigger_Down);
+        if (anyDown) {
             if (attractMode.active) attractMode.interrupt();
             attractMode.resetTimer();
         }
+        const anyHeld = controllers.some(c =>
+            c.trigger_Held || c.grip_Held || c.buttonA_Held || c.buttonB_Held || c.buttonC_Held
+        ) || (mouseController && mouseController.trigger_Held) ||
+            Object.values(keysPressed).some(v => v);
+        if (anyHeld) attractMode.resetTimer();
     }
 
     // Drawing logic - each controller can draw independently
@@ -661,12 +666,10 @@ function animateLoop() {
             const pos = _drawPos;
             controller.getDrawPosition(pos);
             frame.continueStroke(pos, i);
-            if (attractMode) attractMode.resetTimer();
         }
         // End stroke on trigger_Up
         else if (controller.trigger_Up) {
             frame.endStroke(i);
-            if (attractMode) attractMode.resetTimer();
         }
     }
 
@@ -726,10 +729,8 @@ function animateLoop() {
                 const pos = _drawPos;
                 mouseController.getDrawPosition(pos);
                 frame.continueStroke(pos, MOUSE_CONTROLLER_ID);
-                if (attractMode) attractMode.resetTimer();
             } else if (mouseController.trigger_Up) {
                 frame.endStroke(MOUSE_CONTROLLER_ID);
-                if (attractMode) attractMode.resetTimer();
             }
         }
     }
