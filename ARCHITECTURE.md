@@ -125,6 +125,7 @@ The 3D **drawing mode** is an ES-module-based environment built on Three.js and 
 - `mouse.js` - Mouse controller that projects mouse input into 3D space for drawing and palette interaction.
 - `palette.js` - Interactive color selection wheel.
 - `worldscale.js` - Implements two-handed pinch/zoom/rotate gestures to manipulate the 3D drawing canvas.
+- `attract.js` - An idle "attract mode" that automatically animates past drawings stroke by stroke when the drawing mode is inactive.
 
 **Drawing mode** is initialized via `startDrawingMode(container)` and torn down via `stopDrawingMode()`. When active, it takes over the screen to allow hand-tracked drawing via a webcam. When finished or exited, the app returns to **review mode** and the drawn strokes can be serialized, encoded to NAPLPS, and either broadcast to other clients or minted to the blockchain.
 
@@ -157,7 +158,8 @@ The mouse only ever shows the chrome; "h" is the way to put it away. The pointer
  
 ---
 
-## Tools & Scripts
+## Documentation, Tools & Scripts
 
-- **`tools/` Directory**: Contains offline utilities. `brush-geometry` is used to analyze drawing geometry and optimize the simplification pipeline. `thumbnail-maker` and `key-generator.sh` support other aspects of managing assets and keys.
+- **`docs/` Directory**: Contains research notes, design documentation, and legacy analysis reports (e.g., `TEIA.md`, `RESEARCH_001.md`, and the `deprecated/` subfolder).
+- **`tools/` Directory**: Contains offline utilities. `brush-geometry` is used to analyze drawing geometry and optimize the simplification pipeline. `thumbnail-maker` and `key-generator.sh` support other aspects of managing assets and keys. `vendor-three.mjs` is used to vendor the required subset of Three.js into the frontend.
 - **Root Execution Scripts**: `run.*`, `setup.*`, and `kiosk-*` scripts automate server start and dependencies configuration across macOS, Windows, and Raspberry Pi environments. `redeploy.sh` enables automated deployment via GitHub webhooks.
