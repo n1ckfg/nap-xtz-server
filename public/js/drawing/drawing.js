@@ -1364,41 +1364,7 @@ function convertToNAPLPS() {
     const buildInput = (epsilon) => {
         const input = [];
 
-        for (const stroke of frame.strokes) {
-            if (!stroke.points || stroke.points.length < 2) continue;
-
-            // Convert hex color to RGB Vector3 (0-255)
-            const hex = stroke.color || 0xffffff;
-            const r = (hex >> 16) & 0xff;
-            const g = (hex >> 8) & 0xff;
-            const b = hex & 0xff;
-            const color = new window.Vector3(r, g, b);
-
-            // Closed strokes: the polyline IS the polygon — no brush expansion.
-            if (stroke.closed) {
-                const verts = stroke.toScreenPolygon(project);
-                if (verts.length < 3) continue;
-                const poly = verts.map(v => new window.Vector2(
-                    Math.max(0, Math.min(1, v.x)),
-                    Math.max(0, Math.min(1, v.y))
-                ));
-                input.push(new window.NapInputWrapper(color, poly, true));
-                continue;
-            }
-
-            // Radically simplified polygon structure: just a series of simple quads
-            // for each segment. This is rock-solid reliable as convex quads render
-            // consistently everywhere, avoiding the complex corner fans, caps,
-            // and overlap logic that was over-engineering it.
-            const { points, radii } = stroke.toScreenPath(project, widthAxis);
-            if (points.length < 2) continue;
-
-            // Still apply the same simplification as before so we don't blow the byte limit
-            // (Note: we borrow simplifyIndices logic here or call a helper if available, 
-            // but stroke.toScreenPath doesn't simplify. We can call stroke's own simplifier if needed, 
-            // but since we want it radically simple, we can just use the points.
-            // Wait, we need to apply epsilon simplify. 
-            const simplifyIndices = (pts, eps, start, end) => {
+        const simplifyIndices = (pts, eps, start, end) => {
                 if (end - start < 2) return [start, end];
                 let maxDist = 0, maxIdx = start;
                 for (let i = start + 1; i < end; i++) {
@@ -1416,18 +1382,44 @@ function convertToNAPLPS() {
                     return [...simplifyIndices(pts, eps, start, maxIdx).slice(0, -1), ...simplifyIndices(pts, eps, maxIdx, end)];
                 }
                 return [start, end];
-            };
-            
+        };
+
+        for (const stroke of frame.strokes) {
+            if (!stroke.points || stroke.points.length < 2) continue;
+
+            const hex = stroke.color || 0xffffff;
+            const r = (hex >> 16) & 0xff;
+            const g = (hex >> 8) & 0xff;
+            const b = hex & 0xff;
+            const color = new window.Vector3(r, g, b);
+
+            // Closed strokes: the polyline IS the polygon — no brush expansion.
+            if (stroke.closed) {
+                const verts = stroke.toScreenPolygon(project);
+                if (verts.length < 3) continue;
+                const keep = simplifyIndices(verts, epsilon, 0, verts.length - 1);
+                const poly = keep.map(idx => new window.Vector2(
+                    Math.max(0, Math.min(1, verts[idx].x)),
+                    Math.max(0, Math.min(1, verts[idx].y))
+                ));
+                if (poly.length < 3) continue;
+                input.push(new window.NapInputWrapper(color, poly, true));
+                continue;
+            }
+
+            const { points, radii } = stroke.toScreenPath(project, widthAxis);
+            if (points.length < 2) continue;
+
             const keep = simplifyIndices(points, epsilon, 0, points.length - 1);
-            
+
             const leftEdge = [];
             const rightEdge = [];
-            
+
             for (let i = 0; i < keep.length; i++) {
                 const idx = keep[i];
                 const p = points[idx];
-                const r = Math.max(radii[idx], 0.0005);
-                
+                const rad = Math.max(radii[idx], 0.0005);
+
                 let tX = 0, tY = 0;
                 if (i === 0) {
                     const next = points[keep[i+1]];
@@ -1443,7 +1435,7 @@ function convertToNAPLPS() {
                     tX = next.x - prev.x;
                     tY = next.y - prev.y;
                 }
-                
+
                 const len = Math.hypot(tX, tY);
                 if (len > 1e-8) {
                     tX /= len;
@@ -1452,20 +1444,20 @@ function convertToNAPLPS() {
                     tX = 1;
                     tY = 0;
                 }
-                
+
                 const pX = -tY;
                 const pY = tX;
-                
+
                 leftEdge.push(new window.Vector2(
-                    Math.max(0, Math.min(1, p.x + pX * r)),
-                    Math.max(0, Math.min(1, p.y + pY * r))
+                    Math.max(0, Math.min(1, p.x + pX * rad)),
+                    Math.max(0, Math.min(1, p.y + pY * rad))
                 ));
                 rightEdge.unshift(new window.Vector2(
-                    Math.max(0, Math.min(1, p.x - pX * r)),
-                    Math.max(0, Math.min(1, p.y - pY * r))
+                    Math.max(0, Math.min(1, p.x - pX * rad)),
+                    Math.max(0, Math.min(1, p.y - pY * rad))
                 ));
             }
-            
+
             const points2D = [...leftEdge, ...rightEdge];
             input.push(new window.NapInputWrapper(color, points2D, true));
         }
