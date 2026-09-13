@@ -56,6 +56,7 @@ export class Stroke {
         this.taperPower = 0.4; // Taper exponent for ends
         this.minThickness = 0.3; // Minimum thickness multiplier
         this.normalOffset = 0; // 3D preview only -- see offsetAlongNormal()
+        this.closed = false;   // When true the polyline is a closed filled polygon
     }
 
     /**
@@ -407,6 +408,30 @@ export class Stroke {
         return { points, radii };
     }
 
+    /**
+     * Projects the polyline as a closed polygon for the NAPLPS encoder.
+     * The last vertex connects back to the first — no brush expansion.
+     *
+     * @param {(point: THREE.Vector3) => {x: number, y: number}} project
+     * @returns {{x: number, y: number}[]}
+     */
+    toScreenPolygon(project) {
+        const verts = [];
+        for (let i = 0; i < this.points.length; i++) {
+            const p = project(this.points[i]);
+            const prev = verts[verts.length - 1];
+            if (prev && Math.hypot(p.x - prev.x, p.y - prev.y) < MIN_STEP) continue;
+            verts.push(p);
+        }
+        if (verts.length > 1) {
+            const first = verts[0];
+            const last = verts[verts.length - 1];
+            if (Math.hypot(first.x - last.x, first.y - last.y) >= MIN_STEP) {
+                verts.push({ x: first.x, y: first.y });
+            }
+        }
+        return verts;
+    }
 }
 
 export class Frame extends THREE.Group {
@@ -552,22 +577,19 @@ export class Frame extends THREE.Group {
         }
         this._fillMeshes = [];
 
-        // Add all completed strokes as brush geometry
+        // Add all completed strokes as brush geometry (or fill geometry for closed strokes)
         for (const stroke of this.strokes) {
-            // Create brush mesh for completed stroke
-            const brushGeo = stroke.toBrushGeometry();
-            if (brushGeo) {
-                const brushMat = new THREE.MeshBasicMaterial({
+            const geo = stroke.closed ? stroke.toFillGeometry() : stroke.toBrushGeometry();
+            if (geo) {
+                const mat = new THREE.MeshBasicMaterial({
                     color: stroke.color,
                     side: THREE.DoubleSide
                 });
-                const brushMesh = new THREE.Mesh(brushGeo, brushMat);
-                brushMesh.frustumCulled = false;
-                // The z-offset that keeps strokes from z-fighting lives here
-                // rather than in the points -- see Stroke.offsetAlongNormal()
-                brushMesh.position.copy(stroke.previewOffset());
-                this.add(brushMesh);
-                this._fillMeshes.push(brushMesh);
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.frustumCulled = false;
+                mesh.position.copy(stroke.previewOffset());
+                this.add(mesh);
+                this._fillMeshes.push(mesh);
             }
         }
 
@@ -606,13 +628,16 @@ export class Frame extends THREE.Group {
             return;
         }
 
-        // Create a temporary stroke from temp points to generate brush geometry
+        // Create a temporary stroke from temp points to generate geometry
         const activeStroke = this._activeStrokes.get(controllerId);
         const tempStroke = new Stroke(activeStroke ? activeStroke.color : 0xffffff);
         tempStroke.points = tempPoints.map(p => p.clone());
+        tempStroke.closed = activeStroke ? activeStroke.closed : false;
         tempStroke.computePressures();
 
-        const geometry = tempStroke.toBrushGeometry();
+        const geometry = tempStroke.closed
+            ? tempStroke.toFillGeometry()
+            : tempStroke.toBrushGeometry();
         if (!geometry) return;
 
         const fillColor = activeStroke ? activeStroke.color : 0xffffff;

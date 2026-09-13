@@ -338,6 +338,7 @@ export class Controller extends THREE.Object3D {
             this.buttonC_Held = false;
         }
         this.buttonC_Down = this.buttonC_Held && !this._wasButtonC_Held;
+        this.buttonC_Up = !this.buttonC_Held && this._wasButtonC_Held;
         this._wasButtonC_Held = this.buttonC_Held;
     }
 }

@@ -675,6 +675,26 @@ function animateLoop() {
         }
     }
 
+    // V-gesture (Victory / buttonC) drawing — closed filled polygons.
+    // Separate from trigger drawing so the two gestures can diverge later.
+    for (let i = 0; i < MAX_HANDS; i++) {
+        const controller = controllers[i];
+        const vStrokeId = 'v' + i;
+
+        if (controller.buttonC_Down) {
+            const pos = _drawPos;
+            controller.getDrawPosition(pos);
+            const stroke = frame.beginStroke(pos, vStrokeId, controllerDrawColor[i]);
+            stroke.closed = true;
+        } else if (controller.buttonC_Held && frame.hasActiveStroke(vStrokeId)) {
+            const pos = _drawPos;
+            controller.getDrawPosition(pos);
+            frame.continueStroke(pos, vStrokeId);
+        } else if (controller.buttonC_Up) {
+            frame.endStroke(vStrokeId);
+        }
+    }
+
     // Mouse controller update and drawing
     if (mouseController) {
         mouseController.update(camera);
@@ -858,41 +878,42 @@ function animateLoop() {
     }
 
     // Double buttonC (Victory gesture) = instant full reset (buttons, camera, world)
-    const bothButtonC = controllers.every(c => c.buttonC_Held);
-    if (bothButtonC) {
-        // Reset all button states on both controllers
-        for (const controller of controllers) {
-            controller.grip_Down = false;
-            controller.grip_Held = false;
-            controller.trigger_Down = false;
-            controller.trigger_Held = false;
-            controller.trigger_Up = false;
-            controller.buttonA_Down = false;
-            controller.buttonA_Held = false;
-            controller.buttonB_Down = false;
-            controller.buttonB_Held = false;
-            controller.buttonC_Down = false;
-            controller.buttonC_Held = false;
-        }
-        // Reset camera
-        resetCamera();
-        // Reset world origin
-        worldNode.position.set(0, 0, 0);
-        worldNode.quaternion.identity();
-        worldNode.scale.set(1, 1, 1);
-        // Reset undo/reset timer state
-        undoHoldStart = null;
-        undoFlickerStart = null;
-        pendingAction = null;
-        undoOverlay.style.display = 'none';
-        undoCircleLeft.style.display = 'none';
-        undoCircleRight.style.display = 'none';
-        // Reset orientation objects fade
-        orientationFadeStart = now;
-        for (const obj of orientationObjects) {
-            obj.material.opacity = 1;
-        }
-    }
+    // Commented out: V gesture is now used for drawing instead.
+    // const bothButtonC = controllers.every(c => c.buttonC_Held);
+    // if (bothButtonC) {
+    //     // Reset all button states on both controllers
+    //     for (const controller of controllers) {
+    //         controller.grip_Down = false;
+    //         controller.grip_Held = false;
+    //         controller.trigger_Down = false;
+    //         controller.trigger_Held = false;
+    //         controller.trigger_Up = false;
+    //         controller.buttonA_Down = false;
+    //         controller.buttonA_Held = false;
+    //         controller.buttonB_Down = false;
+    //         controller.buttonB_Held = false;
+    //         controller.buttonC_Down = false;
+    //         controller.buttonC_Held = false;
+    //     }
+    //     // Reset camera
+    //     resetCamera();
+    //     // Reset world origin
+    //     worldNode.position.set(0, 0, 0);
+    //     worldNode.quaternion.identity();
+    //     worldNode.scale.set(1, 1, 1);
+    //     // Reset undo/reset timer state
+    //     undoHoldStart = null;
+    //     undoFlickerStart = null;
+    //     pendingAction = null;
+    //     undoOverlay.style.display = 'none';
+    //     undoCircleLeft.style.display = 'none';
+    //     undoCircleRight.style.display = 'none';
+    //     // Reset orientation objects fade
+    //     orientationFadeStart = now;
+    //     for (const obj of orientationObjects) {
+    //         obj.material.opacity = 1;
+    //     }
+    // }
 
     // Undo/Reset logic with hold timer and shrinking circle
     const buttonBCount = controllers.filter(c => c.buttonB_Held).length;
@@ -1353,9 +1374,21 @@ function convertToNAPLPS() {
             const b = hex & 0xff;
             const color = new window.Vector3(r, g, b);
 
-            // Radically simplified polygon structure: just a series of simple quads 
-            // for each segment. This is rock-solid reliable as convex quads render 
-            // consistently everywhere, avoiding the complex corner fans, caps, 
+            // Closed strokes: the polyline IS the polygon — no brush expansion.
+            if (stroke.closed) {
+                const verts = stroke.toScreenPolygon(project);
+                if (verts.length < 3) continue;
+                const poly = verts.map(v => new window.Vector2(
+                    Math.max(0, Math.min(1, v.x)),
+                    Math.max(0, Math.min(1, v.y))
+                ));
+                input.push(new window.NapInputWrapper(color, poly, true));
+                continue;
+            }
+
+            // Radically simplified polygon structure: just a series of simple quads
+            // for each segment. This is rock-solid reliable as convex quads render
+            // consistently everywhere, avoiding the complex corner fans, caps,
             // and overlap logic that was over-engineering it.
             const { points, radii } = stroke.toScreenPath(project, widthAxis);
             if (points.length < 2) continue;
