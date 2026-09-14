@@ -200,6 +200,21 @@ function isPolyCmd(opcode) {
     return POLY_OPCODES.has(opcode);
 }
 
+function removeDegeneratePolygons(cmds, pointBytes) {
+    const minDataBytes = pointBytes * 3;
+    const removed = new Set();
+    for (let i = 0; i < cmds.length; i++) {
+        if (isPolyCmd(cmds[i].opcode) && cmds[i].raw.length - 1 < minDataBytes) {
+            removed.add(i);
+            if (i > 0 && cmds[i - 1].opcode === 0x3E) {
+                removed.add(i - 1);
+            }
+        }
+    }
+    if (removed.size === 0) return cmds;
+    return removeDuplicateColors(cmds.filter((_, i) => !removed.has(i)));
+}
+
 // ─── Simplify one set of commands at a given poly-simplify quality ───────────
 
 function simplifyAtQuality(cmds, pointBytes, quality) {
@@ -401,8 +416,9 @@ async function simplifyNaplps(napRaw, maxBytes) {
     let cmds = parseCommands(napRaw);
     let pointBytes = detectPointBytes(cmds);
 
-    // Step 1: remove duplicate SELECT COLOR commands.
+    // Step 1: remove duplicate SELECT COLOR commands and degenerate polygons.
     cmds = removeDuplicateColors(cmds);
+    cmds = removeDegeneratePolygons(cmds, pointBytes);
     let result = assembleCommands(cmds);
     if (result.length <= maxBytes) {
         return { naplps: result, method: "dedup", quality: null };
