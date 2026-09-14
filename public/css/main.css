@@ -1,3 +1,10 @@
+@font-face {
+	font-family: 'Telidon';
+	src: url('../files/fonts/Telidon-Bold/Telidon-Bold.ttf') format('truetype');
+	font-weight: bold;
+	font-style: normal;
+}
+
 html, body {
 	margin: 0;
 	padding: 0;
@@ -8,7 +15,7 @@ html, body {
 body {
 	background-color: #000000;
 	font-size: 17px;
-	font-family: "Arial", "Helvetica", "sans-serif";
+	font-family: 'Telidon', sans-serif;
 }
 
 a {
@@ -154,7 +161,7 @@ a:hover {
 	color: #88ccff;
 	font-size: 0.82em;
 	vertical-align: middle;
-	font-family: monospace;
+	font-family: inherit;
 }
 
 .tezos-size {
@@ -176,7 +183,7 @@ a:hover {
 	padding: 0.5em 1em;
 	cursor: pointer;
 	font-size: 0.9em;
-	font-family: inherit;
+	font-family: 'Telidon', sans-serif;
 	font-weight: bold;
 }
 
@@ -220,7 +227,7 @@ a:hover {
 	left: 50%;
 	transform: translate(-50%, -50%);
 	color: white;
-	font-family: sans-serif;
+	font-family: inherit;
 	pointer-events: none;
 	z-index: 10;
 }
@@ -228,7 +235,7 @@ a:hover {
 #drawing-container .label {
 	position: absolute;
 	color: white;
-	font-family: sans-serif;
+	font-family: inherit;
 	font-size: 14px;
 	pointer-events: none;
 	text-align: center;
@@ -290,7 +297,7 @@ a:hover {
 	left: 50%;
 	transform: translateX(-50%);
 	color: #ffcc00;
-	font-family: sans-serif;
+	font-family: inherit;
 	font-size: 1.2em;
 	text-shadow: 1px 1px 2px black;
 	pointer-events: none;
@@ -310,6 +317,7 @@ a:hover {
 	padding: 0.5em 1em;
 	cursor: pointer;
 	font-size: 1em;
+	font-family: 'Telidon', sans-serif;
 	font-weight: bold;
 }
 /* ── UI visibility toggle ("h", or moving the mouse) ──
