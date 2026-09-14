@@ -229,12 +229,177 @@ function simplifyAtQuality(cmds, pointBytes, quality) {
     });
 }
 
+// ─── Strategy C: drop smallest polygons ─────────────────────────────────────
+
+function dropSmallestPolygons(cmds, maxBytes) {
+    const polys = [];
+    for (let i = 0; i < cmds.length; i++) {
+        if (isPolyCmd(cmds[i].opcode)) {
+            polys.push({ index: i, size: cmds[i].raw.length });
+        }
+    }
+    polys.sort((a, b) => a.size - b.size);
+
+    let totalSize = cmds.reduce((s, c) => s + c.raw.length, 0);
+    const removed = new Set();
+
+    for (const p of polys) {
+        if (totalSize <= maxBytes) break;
+        removed.add(p.index);
+        totalSize -= p.size;
+        if (p.index > 0 && cmds[p.index - 1].opcode === 0x3E && !removed.has(p.index - 1)) {
+            removed.add(p.index - 1);
+            totalSize -= cmds[p.index - 1].raw.length;
+        }
+    }
+
+    if (removed.size === 0) return cmds;
+    return removeDuplicateColors(cmds.filter((_, i) => !removed.has(i)));
+}
+
+// ─── Strategy B: domain downgrade ───────────────────────────────────────────
+
+const GEO_OPCODES = new Set([
+    0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B,
+    0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33,
+    0x34, 0x35, 0x36, 0x37, 0x38
+]);
+
+function reencodeRawPoint(data, offset, oldPB, newPB) {
+    const oldBitExp = oldPB * 3 - 1;
+    const newBitExp = newPB * 3 - 1;
+    let xBits = "", yBits = "";
+    let signX, signY;
+
+    for (let j = 0; j < oldPB; j++) {
+        const d = data.charCodeAt(offset + j) & 0x3F;
+        if (j === 0) {
+            signX = (d >> 5) & 1;
+            xBits += ((d >> 4) & 1);
+            xBits += ((d >> 3) & 1);
+            signY = (d >> 2) & 1;
+            yBits += ((d >> 1) & 1);
+            yBits += (d & 1);
+        } else {
+            xBits += ((d >> 5) & 1);
+            xBits += ((d >> 4) & 1);
+            xBits += ((d >> 3) & 1);
+            yBits += ((d >> 2) & 1);
+            yBits += ((d >> 1) & 1);
+            yBits += (d & 1);
+        }
+    }
+
+    const xMag = parseInt(xBits, 2);
+    const yMag = parseInt(yBits, 2);
+    const oldMax = (1 << oldBitExp) - 1;
+    const newMax = (1 << newBitExp) - 1;
+    const newXMag = Math.min(newMax, Math.round(xMag * newMax / oldMax));
+    const newYMag = Math.min(newMax, Math.round(yMag * newMax / oldMax));
+    const binX = newXMag.toString(2).padStart(newBitExp, "0");
+    const binY = newYMag.toString(2).padStart(newBitExp, "0");
+
+    let result = "";
+    let xi = 0, yi = 0;
+    for (let i = 0; i < newPB; i++) {
+        let b = 0x40;
+        if (i === 0) {
+            b |= (signX << 5);
+            b |= (parseInt(binX[xi++]) << 4);
+            b |= (parseInt(binX[xi++]) << 3);
+            b |= (signY << 2);
+            b |= (parseInt(binY[yi++]) << 1);
+            b |= parseInt(binY[yi++]);
+        } else {
+            b |= (parseInt(binX[xi++]) << 5);
+            b |= (parseInt(binX[xi++]) << 4);
+            b |= (parseInt(binX[xi++]) << 3);
+            b |= (parseInt(binY[yi++]) << 2);
+            b |= (parseInt(binY[yi++]) << 1);
+            b |= parseInt(binY[yi++]);
+        }
+        result += String.fromCharCode(b);
+    }
+    return result;
+}
+
+function downgradeDomain(cmds, oldPB, newPB) {
+    return cmds.map(cmd => {
+        if (cmd.opcode === 0x21 && cmd.raw.length > 1) {
+            const bits = cmd.raw.charCodeAt(1) & 0x3F;
+            const newBits = (bits & ~0x1C) | (((newPB - 1) & 0x07) << 2);
+            return {
+                opcode: cmd.opcode,
+                raw: cmd.raw[0] + String.fromCharCode(0x40 | newBits) + cmd.raw.substring(2)
+            };
+        }
+        if (GEO_OPCODES.has(cmd.opcode)) {
+            const data = cmd.raw.substring(1);
+            if (data.length < oldPB) return cmd;
+            let newData = "";
+            for (let i = 0; i + oldPB <= data.length; i += oldPB) {
+                newData += reencodeRawPoint(data, i, oldPB, newPB);
+            }
+            return { opcode: cmd.opcode, raw: cmd.raw[0] + newData };
+        }
+        return cmd;
+    });
+}
+
+// ─── Strategy A: maxPoints budget ───────────────────────────────────────────
+
+function applyMaxPointsBudget(cmds, pointBytes, maxBytes) {
+    let nonPolyBytes = 0;
+    const polyInfos = [];
+
+    for (let i = 0; i < cmds.length; i++) {
+        if (isPolyCmd(cmds[i].opcode)) {
+            polyInfos.push({ index: i, points: Math.floor((cmds[i].raw.length - 1) / pointBytes) });
+        } else {
+            nonPolyBytes += cmds[i].raw.length;
+        }
+    }
+
+    if (polyInfos.length === 0) return cmds;
+
+    const totalPoints = polyInfos.reduce((s, p) => s + p.points, 0);
+    const availForPoints = maxBytes - nonPolyBytes - polyInfos.length;
+    const maxTotalPoints = Math.floor(availForPoints / pointBytes);
+
+    if (maxTotalPoints >= totalPoints) return cmds;
+
+    const ratio = Math.max(0, maxTotalPoints / totalPoints);
+
+    return cmds.map(cmd => {
+        if (!isPolyCmd(cmd.opcode)) return cmd;
+
+        const data = cmd.raw.substring(1);
+        const numPoints = Math.floor(data.length / pointBytes);
+        const budget = Math.max(2, Math.floor(numPoints * ratio));
+        if (budget >= numPoints) return cmd;
+
+        const allRel = POLY_ALL_RELATIVE.has(cmd.opcode);
+        const absPoints = decodePolyPoints(data, pointBytes, allRel);
+        if (absPoints.length <= budget) return cmd;
+
+        const sampled = [absPoints[0]];
+        const step = (absPoints.length - 1) / (budget - 1);
+        for (let j = 1; j < budget - 1; j++) {
+            sampled.push(absPoints[Math.round(j * step)]);
+        }
+        sampled.push(absPoints[absPoints.length - 1]);
+
+        const newData = encodePolyData(sampled, pointBytes);
+        return { opcode: cmd.opcode, raw: cmd.raw[0] + newData };
+    });
+}
+
 // ─── Main entry point ────────────────────────────────────────────────────────
 
 async function simplifyNaplps(napRaw, maxBytes) {
     await polySimplifyReady;
     let cmds = parseCommands(napRaw);
-    const pointBytes = detectPointBytes(cmds);
+    let pointBytes = detectPointBytes(cmds);
 
     // Step 1: remove duplicate SELECT COLOR commands.
     cmds = removeDuplicateColors(cmds);
@@ -244,12 +409,12 @@ async function simplifyNaplps(napRaw, maxBytes) {
     }
 
     // Step 2: poly-simplify with quality ladder.
-    // Keep the deduped commands as the baseline for simplification.
     const original = cmds;
 
     // Phase A: coarse search, decrement by 0.2 from 0.8.
     let bestQuality = null;
     for (let q = 0.8; q >= 0.2; q -= 0.2) {
+        q = Math.round(q * 100) / 100;
         const s = simplifyAtQuality(original, pointBytes, q);
         result = assembleCommands(s);
         if (result.length <= maxBytes) {
@@ -259,38 +424,67 @@ async function simplifyNaplps(napRaw, maxBytes) {
     }
 
     if (bestQuality === null) {
-        // Even 0.2 didn't fit — try the floor.
         const s = simplifyAtQuality(original, pointBytes, 0.05);
         result = assembleCommands(s);
         if (result.length <= maxBytes) {
             bestQuality = 0.05;
-        } else {
-            return { naplps: result, method: "simplify", quality: 0.05 };
         }
     }
 
-    // Phase B: refine upward by 0.05 from bestQuality.
-    let ceiling = bestQuality;
-    for (let q = bestQuality + 0.05; q <= 1.0; q += 0.05) {
-        q = Math.round(q * 100) / 100;
-        const s = simplifyAtQuality(original, pointBytes, q);
-        const r = assembleCommands(s);
-        if (r.length > maxBytes) break;
-        ceiling = q;
-        result = r;
-    }
+    if (bestQuality !== null) {
+        // Phase B: refine upward by 0.05.
+        let ceiling = bestQuality;
+        for (let q = bestQuality + 0.05; q <= 1.0; q += 0.05) {
+            q = Math.round(q * 100) / 100;
+            const s = simplifyAtQuality(original, pointBytes, q);
+            const r = assembleCommands(s);
+            if (r.length > maxBytes) break;
+            ceiling = q;
+            result = r;
+        }
 
-    // Phase C: fine-tune downward by 0.01 from ceiling.
-    for (let q = ceiling; q >= 0.01; q -= 0.01) {
-        q = Math.round(q * 100) / 100;
-        const s = simplifyAtQuality(original, pointBytes, q);
-        const r = assembleCommands(s);
-        if (r.length <= maxBytes) {
-            return { naplps: r, method: "simplify", quality: q };
+        // Phase C: fine-tune downward by 0.01.
+        for (let q = ceiling; q >= 0.01; q -= 0.01) {
+            q = Math.round(q * 100) / 100;
+            const s = simplifyAtQuality(original, pointBytes, q);
+            const r = assembleCommands(s);
+            if (r.length <= maxBytes) {
+                return { naplps: r, method: "simplify", quality: q };
+            }
         }
     }
 
-    return { naplps: result, method: "simplify", quality: ceiling };
+    // Quality ladder exhausted. Apply aggressive strategies C → B → A.
+    let working = simplifyAtQuality(original, pointBytes, 0.01);
+    result = assembleCommands(working);
+
+    // Strategy C: drop smallest polygons first.
+    if (result.length > maxBytes) {
+        working = dropSmallestPolygons(working, maxBytes);
+        result = assembleCommands(working);
+        if (result.length <= maxBytes) {
+            return { naplps: result, method: "drop-small", quality: 0.01 };
+        }
+    }
+
+    // Strategy B: domain downgrade (e.g. 4-byte → 3-byte points).
+    if (result.length > maxBytes && pointBytes > 1) {
+        const newPB = pointBytes - 1;
+        working = downgradeDomain(working, pointBytes, newPB);
+        pointBytes = newPB;
+        result = assembleCommands(working);
+        if (result.length <= maxBytes) {
+            return { naplps: result, method: "domain-downgrade", quality: 0.01 };
+        }
+    }
+
+    // Strategy A: enforce a per-polygon maxPoints budget.
+    if (result.length > maxBytes) {
+        working = applyMaxPointsBudget(working, pointBytes, maxBytes);
+        result = assembleCommands(working);
+    }
+
+    return { naplps: result, method: "maxpoints", quality: 0.01 };
 }
 
 module.exports = { simplifyNaplps };
