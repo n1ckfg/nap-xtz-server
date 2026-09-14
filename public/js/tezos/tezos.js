@@ -78,7 +78,7 @@ function simplifyCurrentDrawing() {
     .then(function(data) {
         if (data.ok && data.naplps) {
             var detail = data.method === "dedup" ? "removed duplicate colors"
-                : "simplified at quality " + data.quality;
+                : "at quality " + data.quality;
             setStatus("simplified (" + detail + ")");
             window.pendingNapRaw = data.naplps;
             if (typeof window.loadTelidonFromText === "function") {

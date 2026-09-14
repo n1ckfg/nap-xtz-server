@@ -185,6 +185,7 @@
 				    stopSlideshow();
 				    //if (window.armDelete) window.armDelete();
 				    loop(); // redraw once to show the placeholder, then idle
+				    if (typeof setStatus === 'function') setStatus("Cleared");
 			    });
 
 			    // Start the slideshow (loading other content stops it).
@@ -297,6 +298,7 @@
 		        		setupSvg(element);
 		        	} else {
 			            loadTelidonFromText(e2.target.result);
+			            if (typeof setStatus === 'function') setStatus("Local file load");
 		        	}
 		        }
 		        reader.readAsText(file, 'UTF-8');   
@@ -559,7 +561,7 @@
 				console.log('[nap-xtz] SVG encoded to NAPLPS, length:', encoder.napRaw.length);
 				const btnMint = document.getElementById('btn-mint');
 				if (btnMint) btnMint.style.display = 'inline-block';
-				if (typeof setStatus === 'function') setStatus('SVG encoded');
+				if (typeof setStatus === 'function') setStatus('Local file load');
 
 				loadTelidonFromText(encoder.napRaw);
 			}
@@ -726,7 +728,7 @@
 	<body class="ui-hidden">
 		<div id="container">
 			<div class="sketch">
-				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz-server"><i>repo</i></a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;
+				&nbsp;&nbsp;<a href="https://github.com/n1ckfg/nap-xtz-server"><i>nap-xtz-server</i></a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;
 				<a href="javascript:void(0)" id="prev-token"><i>&lt;&lt;</i></a>&nbsp;
 				<a href="javascript:void(0)" id="latest"><i>latest</i></a>&nbsp;
 				<a href="javascript:void(0)" id="next-token"><i>&gt;&gt;</i></a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;
@@ -765,7 +767,7 @@
 					<form>
 						<label style="color: #ffffff;" for="naplps_field">Add NAPLPS Text: </label><br>
 						<input type="text" id="naplps_field" name="naplps_field"><br>
-	  					<input type="button" onclick="onFormSubmit()" value="Submit">
+	  					<input type="button" class="tezos-btn" onclick="onFormSubmit()" value="Submit">
 					</form> 
 				</div>
 				<div style="position: relative; margin-left: 180px; margin-top: -60px;">
