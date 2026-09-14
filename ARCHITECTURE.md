@@ -71,6 +71,7 @@ Note that drawings bound for the Pi are checked against `RPI_MAX_BYTES` (default
 | `POST /api/tezos/mint` | Headless server-side mint (requires `TEZOS_SECRET_KEY` and Taquito) |
 | `POST /api/tezos/minted` | Notification from client that a wallet mint was broadcast; accelerates polling |
 | `POST /api/naplps` | Broadcasts a drawing to all connected clients (no chain involved) |
+| `POST /api/naplps/simplify` | Simplifies a drawing to fit within `TEZOS_MAX_BYTES` — first removes duplicate SELECT COLOR opcodes, then uses `poly-simplify` with a quality ladder to reduce polygon point counts |
 | `GET /api/rpi/status` | Which Pis are configured, and which are currently connected |
 | `POST /api/rpi/naplps` | Sends a drawing to the Pis *only* — no broadcast to other clients |
 | `POST /api/rpi/command` | Sends `take_photo` or `stream_photo` to every Pi |

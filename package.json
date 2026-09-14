@@ -8,6 +8,7 @@
         "dotenv": "^8.0.0",
         "express": "^4.22.2",
         "node-cmd": "^5.0.0",
+        "poly-simplify": "^0.1.9",
         "socket.io": "^4.8.1",
         "three": "^0.185.1",
         "ws": "^8.18.0"

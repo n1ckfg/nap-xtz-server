@@ -15,6 +15,7 @@ const dotenv = require("dotenv").config();
 // TEZOS_MAX_BYTES that isn't a whole number would switch the size check off
 // rather than set it (see mint-limit.js).
 const { readMintLimit } = require("./mint-limit");
+const { simplifyNaplps } = require("./naplps-simplify");
 const mintLimit = readMintLimit();
 if (mintLimit.error) {
     console.error("\n" + mintLimit.error + " Not starting -- fix it (in .env or the environment), " +
@@ -896,6 +897,26 @@ app.post("/api/naplps", function(req, res) {
     });
 
     res.json({ ok: true, at: message.at, bytes: napRaw.length });
+});
+
+app.post("/api/naplps/simplify", async function(req, res) {
+    const napRaw = req.body && req.body.naplps;
+    if (typeof napRaw !== "string" || napRaw.length === 0) {
+        return res.status(400).json({ error: "NAPLPS payload missing or empty" });
+    }
+    try {
+        const result = await simplifyNaplps(napRaw, TEZOS.maxNaplpsBytes);
+        res.json({
+            ok: true,
+            naplps: result.naplps,
+            bytes: result.naplps.length,
+            method: result.method,
+            quality: result.quality
+        });
+    } catch (e) {
+        console.error("[simplify]", e);
+        res.status(500).json({ error: "Simplification failed" });
+    }
 });
 
 // ─── Raspberry Pi ─────────────────────────────────────────────────────────────

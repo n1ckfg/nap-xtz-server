@@ -37,7 +37,19 @@ function showSize(msg, isError, limit) {
     if (!el) return;
     if (isError || (limit && parseInt(msg) > limit)) {
         el.style.color = "#ff6666";
-        el.textContent = "size: " + msg + " ... too large";
+        el.innerHTML = "";
+        el.appendChild(document.createTextNode("size: " + msg + " ... "));
+        const link = document.createElement("a");
+        link.textContent = "too large";
+        link.href = "#";
+        link.style.color = "#ff6666";
+        link.style.textDecoration = "underline";
+        link.style.cursor = "pointer";
+        link.onclick = function(e) {
+            e.preventDefault();
+            simplifyCurrentDrawing();
+        };
+        el.appendChild(link);
     } else if (!limit) {
         el.style.color = "#ffffff";
         el.textContent = "size: " + msg;
@@ -45,6 +57,42 @@ function showSize(msg, isError, limit) {
         el.style.color = "#ccff00";
         el.textContent = "size: " + msg + " ... ready to publish";
     }
+}
+
+function simplifyCurrentDrawing() {
+    const napRaw = window.pendingNapRaw;
+    if (!napRaw) return;
+
+    const el = document.getElementById("tezos-size");
+    if (el) {
+        el.style.color = "#ffcc00";
+        el.textContent = "simplifying...";
+    }
+
+    fetch("/api/naplps/simplify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ naplps: napRaw })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.ok && data.naplps) {
+            var detail = data.method === "dedup" ? "removed duplicate colors"
+                : "simplified at quality " + data.quality;
+            setStatus("simplified (" + detail + ")");
+            window.pendingNapRaw = data.naplps;
+            if (typeof window.loadTelidonFromText === "function") {
+                window.loadTelidonFromText(data.naplps);
+            }
+        } else {
+            setStatus("simplification failed: " + (data.error || "unknown"), true);
+            setSize(window.pendingNapRaw ? window.pendingNapRaw.length : "?", true);
+        }
+    })
+    .catch(function(err) {
+        setStatus("simplification error: " + err.message, true);
+        setSize(window.pendingNapRaw ? window.pendingNapRaw.length : "?", true);
+    });
 }
 
 function updateWalletUI() {
