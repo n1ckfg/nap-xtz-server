@@ -427,6 +427,7 @@ async function simplifyNaplps(napRaw, maxBytes) {
     // Step 2: poly-simplify with quality ladder.
     const original = cmds;
 
+    /*
     // Phase A: coarse search, decrement by 0.2 from 0.8.
     let bestQuality = null;
     for (let q = 0.8; q >= 0.2; q -= 0.2) {
@@ -469,9 +470,10 @@ async function simplifyNaplps(napRaw, maxBytes) {
             }
         }
     }
+    */
 
     // Quality ladder exhausted. Apply aggressive strategies C → B → A.
-    let working = simplifyAtQuality(original, pointBytes, 0.01);
+    let working = simplifyAtQuality(original, pointBytes, 0.8); //0.01);
     result = assembleCommands(working);
 
     // Strategy C: drop smallest polygons first.
