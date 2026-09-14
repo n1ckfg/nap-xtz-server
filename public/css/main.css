@@ -18,6 +18,10 @@ body {
 	font-family: 'Telidon', sans-serif;
 }
 
+input, button, textarea, select {
+	font-family: inherit;
+}
+
 a {
 	text-decoration: underline;
 }
