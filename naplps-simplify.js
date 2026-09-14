@@ -483,24 +483,24 @@ async function simplifyNaplps(napRaw, maxBytes) {
         }
     }
 
+    // Strategy A: enforce a per-polygon maxPoints budget.
+    if (result.length > maxBytes) {
+        working = applyMaxPointsBudget(working, pointBytes, maxBytes);
+        result = assembleCommands(working);
+        if (result.length <= maxBytes) {
+            return { naplps: result, method: "maxpoints", quality: 0.01 };
+        }
+    }
+
     // Strategy B: domain downgrade (e.g. 4-byte → 3-byte points).
     if (result.length > maxBytes && pointBytes > 1) {
         const newPB = pointBytes - 1;
         working = downgradeDomain(working, pointBytes, newPB);
         pointBytes = newPB;
         result = assembleCommands(working);
-        if (result.length <= maxBytes) {
-            return { naplps: result, method: "domain-downgrade", quality: 0.01 };
-        }
     }
 
-    // Strategy A: enforce a per-polygon maxPoints budget.
-    if (result.length > maxBytes) {
-        working = applyMaxPointsBudget(working, pointBytes, maxBytes);
-        result = assembleCommands(working);
-    }
-
-    return { naplps: result, method: "maxpoints", quality: 0.01 };
+    return { naplps: result, method: "domain-downgrade", quality: 0.01 };
 }
 
 module.exports = { simplifyNaplps };
