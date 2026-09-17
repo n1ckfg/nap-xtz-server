@@ -79,6 +79,8 @@ function getDrawSize() {
 }
 
 // Palette state per controller
+const paletteRadius = 1.2; //0.5;
+const paletteSwatchSize = 0.2; //0.1;
 const PALETTE_HOLD_DURATION = 1600; // 1.6 seconds to reveal palette
 const PALETTE_FLICKER_DURATION = 300; // 0.3 seconds
 let palettes = [];
@@ -210,12 +212,14 @@ function initThreeJS() {
     worldNode = new THREE.Group();
     scene.add(worldNode);
 
+    const showOrientationObjects = false;
+
     const cubeGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
 
     // Center cube
     const matCenter = new THREE.MeshPhongMaterial({ color: 0x00ff00, transparent: true });
     const cubeCenter = new THREE.Mesh(cubeGeo, matCenter);
-    worldNode.add(cubeCenter);
+    if (showOrientationObjects) worldNode.add(cubeCenter);
 
     // Right pyramid (pointing right)
     const pyramidGeo = new THREE.ConeGeometry(0.3, 0.5, 4);
@@ -223,20 +227,23 @@ function initThreeJS() {
     const pyramidRight = new THREE.Mesh(pyramidGeo, matRight);
     pyramidRight.position.set(2, 0, 0);
     pyramidRight.rotation.z = -Math.PI / 2; // Rotate to point right
-    worldNode.add(pyramidRight);
+    if (showOrientationObjects) worldNode.add(pyramidRight);
 
     // Top pyramid (pointing up)
     const matTop = new THREE.MeshPhongMaterial({ color: 0x0000ff, transparent: true });
     const pyramidTop = new THREE.Mesh(pyramidGeo, matTop);
     pyramidTop.position.set(0, 2, 0);
-    worldNode.add(pyramidTop);
+    if (showOrientationObjects) worldNode.add(pyramidTop);
 
     // Store orientation objects for fade effect
-    orientationObjects = [
-        { mesh: cubeCenter, material: matCenter },
-        { mesh: pyramidRight, material: matRight },
-        { mesh: pyramidTop, material: matTop }
-    ];
+    orientationObjects = [];
+    if (showOrientationObjects) {
+        orientationObjects = [
+            { mesh: cubeCenter, material: matCenter },
+            { mesh: pyramidRight, material: matRight },
+            { mesh: pyramidTop, material: matTop }
+        ];
+    }
     orientationFadeStart = performance.now();
 
     // Create meshes and controllers for hands
@@ -267,7 +274,7 @@ function initThreeJS() {
         controllers.push(controller);
 
         // Create palette for this controller
-        const palette = new Palette(0.6, 0.08);
+        const palette = new Palette(paletteRadius, paletteSwatchSize);
         palette.visible = false;
         scene.add(palette);
         palettes.push(palette);
