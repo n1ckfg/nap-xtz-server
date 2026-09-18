@@ -11,6 +11,8 @@ let gestureRecognizer;
 let video;
 let results;
 let lastVideoTime = -1;
+let mpFrameCount = 0;
+const MP_SKIP = 2; // recognize every 2nd webcam frame (~15fps at a 30fps webcam)
 
 // Three.js variables
 let scene, camera, renderer;
@@ -164,7 +166,7 @@ async function setupMediaPipe() {
     gestureRecognizer = await window.GestureRecognizer.createFromOptions(vision, {
         baseOptions: {
             modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
-            delegate: "GPU"
+            delegate: navigator.gpu ? "GPU" : "CPU"
         },
         runningMode: "VIDEO",
         numHands: MAX_HANDS
@@ -185,18 +187,18 @@ function initThreeJS() {
 
     // Set up renderer
     const size = getDrawSize();
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: false });
     // Cap pixel ratio: on HiDPI displays the default (2+) doubles fill-rate
     // cost for little visible gain at this scene complexity.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
     renderer.setSize(size.w, size.h);
     // Don't append here - startDrawingMode will handle it
 
     // VHSC post-processing: render the scene into a texture, then draw it to
     // the screen through the blur→sharpen→posterize chain.
     vhscPass = createVHSCPass(
-        Math.round(size.w * Math.min(window.devicePixelRatio, 1.5)),
-        Math.round(size.h * Math.min(window.devicePixelRatio, 1.5))
+        Math.round(size.w * Math.min(window.devicePixelRatio, 1.0)),
+        Math.round(size.h * Math.min(window.devicePixelRatio, 1.0))
     );
 
     // Add some lighting
@@ -384,8 +386,8 @@ function onWindowResize() {
     renderer.setSize(size.w, size.h);
     if (vhscPass) {
         vhscPass.renderTarget.setSize(
-            Math.round(size.w * Math.min(window.devicePixelRatio, 1.5)),
-            Math.round(size.h * Math.min(window.devicePixelRatio, 1.5))
+            Math.round(size.w * Math.min(window.devicePixelRatio, 1.0)),
+            Math.round(size.h * Math.min(window.devicePixelRatio, 1.0))
         );
     }
 }
@@ -506,7 +508,7 @@ async function setupWebcam() {
 
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 640, height: 480 }
+            video: { width: 320, height: 240 }
         });
         video.srcObject = stream;
         // Wait for video to be ready
@@ -535,12 +537,16 @@ function animateLoop() {
     // Update keyboard navigation (WASD)
     updateKeyboardNavigation();
 
-    // Run MediaPipe Recognition
+    // Run MediaPipe Recognition, throttled to every MP_SKIP-th webcam frame so
+    // the recognizer doesn't run on every animation frame.
     if (gestureRecognizer && video.readyState >= 2) {
         let nowInMs = Date.now();
         if (video.currentTime !== lastVideoTime) {
-            results = gestureRecognizer.recognizeForVideo(video, nowInMs);
-            lastVideoTime = video.currentTime;
+            lastVideoTime = video.currentTime; // mark the frame as seen
+            if (++mpFrameCount >= MP_SKIP) {
+                results = gestureRecognizer.recognizeForVideo(video, nowInMs);
+                mpFrameCount = 0;
+            }
         }
     }
 
