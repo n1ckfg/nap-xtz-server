@@ -12,7 +12,7 @@ let video;
 let results;
 let lastVideoTime = -1;
 let mpFrameCount = 0;
-const MP_SKIP = 2; // recognize every 2nd webcam frame (~15fps at a 30fps webcam)
+const MP_SKIP = 1; // recognize every 2nd webcam frame (~15fps at a 30fps webcam)
 
 // Three.js variables
 let scene, camera, renderer;
