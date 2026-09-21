@@ -309,6 +309,51 @@ a:hover {
 	display: none;
 }
 
+/* ── Gesture guide card ──
+   The hand-sign chart, put up when drawing mode opens and again when the
+   thumbs-up gesture recentres the camera (js/drawing/drawing.js holds the five
+   seconds). Like #drawing-status it sits outside the .ui-hidden list, since it
+   has to show when the chrome does not. The artwork is black outlines on white
+   fill over a transparent background, so the card is a dark plate behind it --
+   dark enough that the drawing underneath doesn't read through the hands, and
+   edged in the blue the rest of the drawing-mode chrome uses.
+
+   The fade belongs to the base rule and .visible turns it off, so showing the
+   card is instant and only dropping the class fades it -- the element is
+   display:none until then, and a transition from a just-unhidden element is
+   skipped anyway. */
+#drawing-container #gesture-card {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	z-index: 120;
+	display: none;
+	padding: 1em;
+	border: 2px solid #0077cc;
+	border-radius: 0.5em;
+	background: rgba(0, 0, 0, 0.75);
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 1s linear;
+}
+
+#drawing-container #gesture-card.visible {
+	opacity: 1;
+	transition: none;
+}
+
+#drawing-container #gesture-card img {
+	display: block;
+	/* 4:3, like the drawing canvas it covers; whichever axis runs out first
+	   sets the size, so the card fits a phone-shaped window too. */
+	width: 60vw;
+	max-width: 900px;
+	max-height: 70vh;
+	height: auto;
+	object-fit: contain;
+}
+
 #btn-exit-drawing {
 	position: fixed;
 	top: 20px;

@@ -137,6 +137,14 @@ let drawingStatusEl = null;
 let drawingStatusTimer = null;
 const DRAWING_STATUS_HOLD = 6000; // ms a finished message stays up
 
+// Gesture guide card (the hand-sign chart), shown on entering drawing mode and
+// on the thumbs-up camera reset
+let gestureCardEl = null;
+let gestureCardFadeTimer = null;
+let gestureCardHideTimer = null;
+const GESTURE_CARD_HOLD = 5000; // ms the card stays up before it starts fading
+const GESTURE_CARD_FADE = 1000; // must match the transition in main.css
+
 // Confirm (green expanding) circle state
 let confirmOverlay = null;
 let confirmCircleLeft = null;
@@ -368,6 +376,7 @@ function initThreeJS() {
     }
 
     drawingStatusEl = container.querySelector('#drawing-status') || document.getElementById('drawing-status');
+    gestureCardEl = container.querySelector('#gesture-card') || document.getElementById('gesture-card');
 
     window.addEventListener('resize', onWindowResize, false);
 
@@ -1127,6 +1136,9 @@ function animateLoop() {
             if (wasSingle) {
                 // Reset camera
                 resetCamera();
+                // ...and the gestures again with it: a recentred view is where
+                // someone who has lost their place starts over.
+                showGestureCard();
                 // Reset world origin
                 worldNode.position.set(0, 0, 0);
                 worldNode.quaternion.identity();
@@ -1290,7 +1302,12 @@ export async function startDrawingMode(container) {
     }
 
     drawingStatusEl = container.querySelector('#drawing-status') || document.getElementById('drawing-status');
+    gestureCardEl = container.querySelector('#gesture-card') || document.getElementById('gesture-card');
     hideDrawingStatus(); // whatever the last session ended on shouldn't greet this one
+
+    // The gestures are the only controls this mode has, so every session opens
+    // on the chart, whether it is the first or a return from review mode.
+    showGestureCard();
 
     if (attractMode) attractMode.resetTimer();
 
@@ -1348,6 +1365,8 @@ export function stopDrawingMode() {
     labels.forEach(label => {
         if (label.container) label.container.style.display = 'none';
     });
+
+    hideGestureCard(); // the overlay is going, so a fade shouldn't outlive it
 
     return hadDrawing;
 }
@@ -1599,6 +1618,45 @@ function hideDrawingStatus() {
     clearTimeout(drawingStatusTimer);
     drawingStatusTimer = null;
     if (drawingStatusEl) drawingStatusEl.style.display = 'none';
+}
+
+// ── Gesture guide card ──
+// The hand-sign chart (public/images/hand_gesture_sign.png), up for five
+// seconds and then faded out over a second. Drawing mode has no menu and no
+// visible chrome, so the chart is how the gestures are learned: it greets every
+// session, and a single thumbs-up -- the gesture for "put me back where I
+// started" -- brings it up again, since someone recentring the view is usually
+// someone who has lost their bearings.
+//
+// The fade is the stylesheet's (.visible turns the transition off, so raising
+// the card is instant and only dropping the class fades it). Showing while a
+// fade runs cancels it and starts the five seconds over.
+function showGestureCard() {
+    if (!gestureCardEl) return;
+
+    clearTimeout(gestureCardFadeTimer);
+    clearTimeout(gestureCardHideTimer);
+    gestureCardHideTimer = null;
+
+    gestureCardEl.style.display = 'block';
+    gestureCardEl.classList.add('visible');
+
+    gestureCardFadeTimer = setTimeout(function() {
+        gestureCardFadeTimer = null;
+        gestureCardEl.classList.remove('visible'); // the CSS fade, from here
+        // display:none only once the fade has run, or it would cut it short.
+        gestureCardHideTimer = setTimeout(hideGestureCard, GESTURE_CARD_FADE);
+    }, GESTURE_CARD_HOLD);
+}
+
+function hideGestureCard() {
+    clearTimeout(gestureCardFadeTimer);
+    clearTimeout(gestureCardHideTimer);
+    gestureCardFadeTimer = null;
+    gestureCardHideTimer = null;
+    if (!gestureCardEl) return;
+    gestureCardEl.classList.remove('visible');
+    gestureCardEl.style.display = 'none';
 }
 
 async function mintDrawing() {

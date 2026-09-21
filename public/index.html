@@ -805,6 +805,13 @@
 			<!-- Mint feedback for the gesture flow. Deliberately outside the
 			     .ui-hidden list: it has to show when the chrome does not. -->
 			<div id="drawing-status"></div>
+			<!-- The gesture chart, up for five seconds when drawing mode opens
+			     and again on the thumbs-up camera reset, then faded out.
+			     Outside the .ui-hidden list for the reason #drawing-status is:
+			     a kiosk showing no chrome still has to explain itself. -->
+			<div id="gesture-card">
+				<img src="./images/hand_gesture_sign.png" alt="Hand gestures: one finger draws a line, two draw a filled shape, a fist shows the palette, thumbs-up resets the camera, thumbs-down undoes, two fists move the camera, two thumbs-up mints, two thumbs-down deletes all">
+			</div>
 			<button id="btn-exit-drawing">Exit Drawing</button>
 		</div>
 
