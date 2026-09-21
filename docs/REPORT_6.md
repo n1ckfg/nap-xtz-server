@@ -8,6 +8,9 @@ what accumulates, what never recovers, and what nobody is there to restart.
 
 Findings are ordered by what would actually take the installation down.
 
+**Status:** §1 and §6 are fixed (see *What was done* at the end). Everything
+else stands as written.
+
 ---
 
 ## 1. Attract mode gets quadratically slower as it draws — the kiosk's default state
@@ -311,3 +314,68 @@ an older Node fails loudly at install rather than at the first chain read.
    can't stop the artwork coming up.
 
 §3 (ws heartbeat) and §9 (context loss) are the next two, and both are small.
+
+---
+
+## What was done
+
+**§1 — per-stroke mesh caching.** `Frame._refreshGeometry()` now keeps one mesh
+per completed stroke, `_fillMeshes` index-aligned with `strokes` (null where a
+stroke was too short to make geometry). The two ways `strokes` moves are cheap
+to follow: `endStroke()` appends, `undo()` pops. Materials are shared per colour
+through `_materialFor()` and owned by the Frame, which also fixes `clear()`
+leaving one material per stroke behind.
+
+Measured in Chrome against the previous version, replaying a drawing stroke by
+stroke the way attract mode does:
+
+| strokes | full drawing, before | after | one added point, before | after |
+| --- | --- | --- | --- | --- |
+| 100 | 310 ms | 5 ms | 0.84 ms | 0.02 ms |
+| 300 | 2651 ms | 12 ms | 2.60 ms | 0.01 ms |
+| **601** (median file) | **11213 ms** | **26 ms** | **5.61 ms** | **0.01 ms** |
+| 1000 | 32548 ms | 40 ms | 9.92 ms | 0.01 ms |
+
+The second pair is the one that decides frame rate: the cost of adding a single
+point at that depth, which was linear in strokes already drawn and is now flat.
+Mesh counts match the old code exactly at every size, so the drawing is
+unchanged. Verified alongside: alignment holds through undo, clear and redraw,
+a null-geometry stroke keeps the indices straight, and `clear()` now releases
+the materials.
+
+One caveat on how this was measured. A live A/B — loading the page and letting
+attract mode run for two minutes under each version — came out flat for both,
+and is *not* evidence the change worked. Headless Chromium rasterises the VHSC
+pass in software at ~87 ms a frame, so attract mode advanced roughly one point
+per frame and reached only ~40 strokes in 90 seconds, which is nowhere near the
+depth where the old code hurts. The table above is the real measurement: the
+same `Frame` class, the same three.js, driven directly in the browser.
+
+**§6 — no CDN at boot.** All five external loads now come off disk:
+
+| | was | now |
+| --- | --- | --- |
+| Three.js r160 | unpkg | `js/libraries/threejs/three.module.js` (already vendored) |
+| MediaPipe tasks-vision 0.10.3 | jsdelivr | `js/libraries/mediapipe/tasks-vision_0.10.3.js` (already vendored) |
+| MediaPipe WASM runtime | jsdelivr | `js/libraries/mediapipe/wasm/` (newly vendored, 17 MB) |
+| gesture_recognizer float16/1 | storage.googleapis.com | `js/libraries/mediapipe/models/` (newly vendored, 8 MB) |
+| Beacon SDK 4.3.0 | unpkg | `js/libraries/beacon/walletbeacon.dapp.min.js` (already vendored) |
+
+The `three/addons/` importmap entry is gone rather than pointed somewhere local:
+nothing in `public/js` imports from it. The two MediaPipe paths and the Beacon
+URL are absolute (`/js/libraries/...`) because they are fetched at runtime and
+resolve against the document, as `attract.js` already does for `/images/`.
+
+Verified by loading the page with every non-localhost request blocked at the
+browser: nothing was requested off-machine, MediaPipe reached "Graph
+successfully started running" / "MediaPipe Loaded" from the local wasm and
+model, drawing mode came up with its renderer canvas, and there were no page
+errors or failed requests.
+
+Two things worth knowing. The vendored WASM and model add ~25 MB to the repo
+(`nosimd` is 8.5 MB of that, kept as the fallback for a machine without WASM
+SIMD — `FilesetResolver` picks one and fetches only that one). And the CSP in
+`index.html` still allows `https://unpkg.com` and `https://cdn.jsdelivr.net`
+under `script-src`; nothing loads from them now, so those two entries can come
+out, but removing CSP entries can only break things and never fix them, so that
+was left alone deliberately rather than bundled into this change.

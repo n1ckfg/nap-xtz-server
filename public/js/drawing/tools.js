@@ -463,8 +463,13 @@ export class Frame extends THREE.Group {
             color: 0xffffff,
             side: THREE.DoubleSide
         });
-        this._fillMeshes = [];           // Array of fill meshes for completed strokes
+        // One mesh per completed stroke, index-aligned with `strokes` (null
+        // where a stroke was too short to produce geometry). Built once each
+        // and kept -- see _refreshGeometry().
+        this._fillMeshes = [];
         this._tempFillMeshes = new Map(); // controllerId -> temp fill mesh
+        // Shared materials, one per colour (see _materialFor).
+        this._materials = new Map();      // colour -> MeshBasicMaterial
 
         // Stroke counter for Z-offset to prevent z-fighting
         this._strokeCounter = 0;
@@ -565,32 +570,49 @@ export class Frame extends THREE.Group {
     }
 
     /**
-     * Rebuilds the geometry from all strokes plus active temp points from all controllers
+     * Brings the meshes in line with `strokes`, and rebuilds the active
+     * strokes' temporary geometry.
+     *
+     * A completed stroke never changes again -- endStroke() refines it and
+     * fixes its z-offset before pushing it -- so its mesh is built once and
+     * kept. `_fillMeshes` is index-aligned with `strokes` (null where a stroke
+     * was too short to produce geometry), which makes the two ways `strokes`
+     * moves cheap to follow: endStroke() appends, undo() pops.
+     *
+     * This used to dispose and rebuild every stroke's geometry on every call,
+     * and continueStroke() calls it once per point -- so a drawing of N
+     * strokes cost O(N^2) triangulations, and by a few hundred strokes a
+     * single added point was rebuilding hundreds of meshes in one frame.
+     * Attract mode replays files of 600-1900 polygons, so it met that wall
+     * every time it ran.
      * @private
      */
     _refreshGeometry() {
-        // Remove old fill meshes
-        for (const mesh of this._fillMeshes) {
+        // Strokes that have gone (undo, or a pop before a rebuild).
+        for (let i = this.strokes.length; i < this._fillMeshes.length; i++) {
+            const mesh = this._fillMeshes[i];
+            if (!mesh) continue;
             this.remove(mesh);
             mesh.geometry.dispose();
-            mesh.material.dispose();
         }
-        this._fillMeshes = [];
+        this._fillMeshes.length = this.strokes.length;
 
-        // Add all completed strokes as brush geometry (or fill geometry for closed strokes)
-        for (const stroke of this.strokes) {
+        // Strokes that are new since the last call.
+        for (let i = 0; i < this.strokes.length; i++) {
+            if (this._fillMeshes[i] !== undefined) continue;
+
+            const stroke = this.strokes[i];
             const geo = stroke.closed ? stroke.toFillGeometry() : stroke.toBrushGeometry();
-            if (geo) {
-                const mat = new THREE.MeshBasicMaterial({
-                    color: stroke.color,
-                    side: THREE.DoubleSide
-                });
-                const mesh = new THREE.Mesh(geo, mat);
-                mesh.frustumCulled = false;
-                mesh.position.copy(stroke.previewOffset());
-                this.add(mesh);
-                this._fillMeshes.push(mesh);
+            if (!geo) {
+                this._fillMeshes[i] = null;   // keeps the indices aligned
+                continue;
             }
+
+            const mesh = new THREE.Mesh(geo, this._materialFor(stroke.color));
+            mesh.frustumCulled = false;
+            mesh.position.copy(stroke.previewOffset());
+            this.add(mesh);
+            this._fillMeshes[i] = mesh;
         }
 
         // Add temp brush geometry from all active strokes
@@ -604,10 +626,24 @@ export class Frame extends THREE.Group {
             if (!this._tempPoints.has(controllerId)) {
                 this.remove(mesh);
                 mesh.geometry.dispose();
-                mesh.material.dispose();
                 this._tempFillMeshes.delete(controllerId);
             }
         }
+    }
+
+    /**
+     * One material per colour, shared by every mesh that draws in it and owned
+     * by the Frame -- meshes come and go far too often to each own one. clear()
+     * is the only thing that disposes them.
+     * @private
+     */
+    _materialFor(color) {
+        let mat = this._materials.get(color);
+        if (!mat) {
+            mat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide });
+            this._materials.set(color, mat);
+        }
+        return mat;
     }
 
     /**
@@ -619,8 +655,7 @@ export class Frame extends THREE.Group {
         const existing = this._tempFillMeshes.get(controllerId);
         if (existing) {
             this.remove(existing);
-            existing.geometry.dispose();
-            existing.material.dispose();
+            existing.geometry.dispose();   // the material is shared; clear() owns it
             this._tempFillMeshes.delete(controllerId);
         }
 
@@ -641,12 +676,7 @@ export class Frame extends THREE.Group {
         if (!geometry) return;
 
         const fillColor = activeStroke ? activeStroke.color : 0xffffff;
-        const fillMat = new THREE.MeshBasicMaterial({
-            color: fillColor,
-            side: THREE.DoubleSide
-        });
-
-        const mesh = new THREE.Mesh(geometry, fillMat);
+        const mesh = new THREE.Mesh(geometry, this._materialFor(fillColor));
         mesh.frustumCulled = false;
         this.add(mesh);
         this._tempFillMeshes.set(controllerId, mesh);
@@ -719,6 +749,7 @@ export class Frame extends THREE.Group {
 
         // Clear fill meshes
         for (const mesh of this._fillMeshes) {
+            if (!mesh) continue;
             this.remove(mesh);
             mesh.geometry.dispose();
         }
@@ -729,6 +760,12 @@ export class Frame extends THREE.Group {
             mesh.geometry.dispose();
         }
         this._tempFillMeshes.clear();
+
+        // The meshes above shared these, so they outlive any one of them and
+        // are the Frame's to release. Nothing disposed them before, which left
+        // one material per stroke behind on every clear.
+        for (const mat of this._materials.values()) mat.dispose();
+        this._materials.clear();
 
         // Reset stroke counter
         this._strokeCounter = 0;
@@ -753,7 +790,7 @@ export class Frame extends THREE.Group {
             if (elapsed < FLICKER_DURATION) {
                 const vis = Math.floor(elapsed / FLICKER_INTERVAL) % 2 === 0;
                 this.lineMesh.visible = vis;
-                for (const mesh of this._fillMeshes) mesh.visible = vis;
+                for (const mesh of this._fillMeshes) if (mesh) mesh.visible = vis;
                 requestAnimationFrame(flicker);
             } else {
                 this.lineMesh.visible = true;

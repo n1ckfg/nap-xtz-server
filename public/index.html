@@ -7,19 +7,26 @@
 		<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net blob:; connect-src 'self' https: wss: ws: blob:; img-src 'self' data: blob: https:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-src https:;">
 		<link type="text/css" rel="stylesheet" href="./css/main.css"/>
 
-		<!-- Three.js library for drawing mode -->
+		<!-- Three.js library for drawing mode.
+		     Served from js/libraries/ rather than a CDN: this runs as an
+		     unattended kiosk, and a page that cannot come up without reaching
+		     unpkg turns a flaky gallery network into a blank screen. The
+		     vendored file is revision 160, the same one this used to fetch.
+		     Nothing here imports from three/addons, so that entry is gone
+		     rather than pointing at something we don't vendor. -->
 		<script type="importmap">
 			{
 				"imports": {
-					"three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-					"three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+					"three": "./js/libraries/threejs/three.module.js"
 				}
 			}
 		</script>
 
-		<!-- Load MediaPipe Tasks as a Module and expose to window -->
+		<!-- Load MediaPipe Tasks as a Module and expose to window. Local for
+		     the same reason; the WASM runtime and the gesture model it pulls
+		     in afterwards are local too (see setupMediaPipe in drawing.js). -->
 		<script type="module">
-			import { GestureRecognizer, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+			import { GestureRecognizer, FilesetResolver } from "./js/libraries/mediapipe/tasks-vision_0.10.3.js";
 			window.GestureRecognizer = GestureRecognizer;
 			window.FilesetResolver = FilesetResolver;
 		</script>

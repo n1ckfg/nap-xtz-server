@@ -163,7 +163,9 @@ async function initTezos() {
 // the first time a wallet is wanted (Connect Wallet, or a mint with no server
 // key), or at once when this browser has a session stored from before, so that
 // session comes back as it always has.
-const BEACON_SDK_URL = "https://unpkg.com/@airgap/beacon-dapp@4.3.0/dist/walletbeacon.dapp.min.js";
+// Local rather than unpkg, as with the rest: an installation that cannot reach
+// a CDN should still be able to connect a wallet. Same 4.3.0 bundle.
+const BEACON_SDK_URL = "/js/libraries/beacon/walletbeacon.dapp.min.js";
 let _beaconLoading = null;   // the one load, shared by everything that asks
 
 // Beacon keeps the connected account under this key in localStorage.
