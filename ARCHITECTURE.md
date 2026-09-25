@@ -134,7 +134,7 @@ The 3D **drawing mode** is an ES-module-based environment built on Three.js and 
 
 **One command stream, whatever drew it.** A live drawing and an imported SVG go through the same `NapEncoder`, and they now come out of it the same shape: a `SELECT COLOR` in front of every `SET & POLY FILLED`. Since each stroke is now encoded as a single polygon, it carries a single color command, making the byte overhead negligible compared to the old approach where a stroke was split into dozens of overlapping pieces.
 
-**The polyline is what gets projected.** Strokes are kept as the polyline the hand drew, and the 2D pieces are regenerated from its projected points, so nothing is flattened twice. The one thing that used to break that rule was the per-stroke z-offset that keeps the 3D preview from z-fighting: it was added to the points themselves, so it moved the *encoded* drawing too, by a distance that grew with every stroke added. `Stroke.offsetAlongNormal()` now only records it and `Frame._refreshGeometry()` puts it on the preview mesh, where a trick for the depth buffer belongs.
+**The polyline is what gets projected.** Strokes are kept as the polyline the hand drew, and the 2D pieces are regenerated from its projected points, so nothing is flattened twice. The one thing that used to break that rule was the per-stroke z-offset that keeps the 3D preview from z-fighting: it was added to the points themselves, so it moved the *encoded* drawing too, by a distance that grew with every stroke added. `Stroke.offsetAlongNormal()` now only records it and `Frame._refreshGeometry()` puts it on the preview mesh, where a trick for the depth buffer belongs. Furthermore, `Frame._refreshGeometry()` builds and caches one mesh per completed stroke rather than rebuilding the entire drawing's geometry from scratch on every update, allowing attract mode to replay heavily populated drawings without degrading the frame rate.
 
 **The byte budget: fitting the chain.** `convertToNAPLPS()` in `drawing.js` supplies the projection, since only it knows the camera and the transform the two-handed gesture has left on the drawing. It also owns the size of the result: a drawing over the `maxNaplpsBytes` that `GET /api/config` reports is encoded again with a coarser brush rather than handed to a mint that would refuse it — a stroke survives losing points far better than a drawing survives not being minted. There is no figure in the page to fall back on: until the config has come a drawing isn't fitted at all, and the mint gesture waits for it.
 
@@ -164,6 +164,11 @@ Two overlays stand outside that flag, both inside `#drawing-container`: the mint
 ### Font & Styling
 
 To ensure visual consistency with the 1980s aesthetic, the frontend universally applies the custom **Telidon** font. All typography—including system buttons, input fields, and the yellow status overlay—inherits this font via `public/css/main.css`. The on-screen status text is driven by the `setStatus()` function to provide immediate context for user actions (e.g., displaying "Local file load" during a drag-and-drop or "Cleared" when the canvas is wiped).
+
+
+### Offline-First Dependencies (Kiosk Reliability)
+
+Because the platform is frequently installed as an unattended gallery kiosk where internet connectivity may be unreliable or absent, the frontend strictly avoids fetching libraries from CDNs at boot. All major dependencies—including Three.js, MediaPipe Tasks Vision, the MediaPipe WASM runtime, the `gesture_recognizer` model, and the Beacon SDK—are vendored locally inside `public/js/libraries/`. This ensures the Raspberry Pi slideshow, 3D hand tracking, and offline UI continue to work flawlessly without external network requests.
 
 ---
 
