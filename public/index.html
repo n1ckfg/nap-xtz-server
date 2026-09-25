@@ -208,6 +208,16 @@
 			}
 
 			function draw() {
+			    // Drawing mode's overlay covers this canvas, so there is nothing
+			    // to draw it for -- yet the page opens straight into drawing mode
+			    // just as the latest token arrives, and the reveal and VHSC pass
+			    // would run behind the overlay for as long as the reveal takes,
+			    // taking frame rate from drawing mode and CPU from the hand
+			    // tracker. Leaving drawing mode calls loop() again.
+			    if (liveDrawingActive) {
+			        noLoop();
+			        return;
+			    }
 				background(0);
 			    if (telidon.length < 1) {
 			        fill(255);

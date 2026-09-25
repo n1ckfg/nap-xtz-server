@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Controller } from './controller.js';
+import { HandTracker, HandInput } from './hands.js';
 import { MouseController } from './mouse.js';
 import { OpenXR_WorldScale } from './worldscale.js';
 import { Frame, BRUSH_SIMPLIFY, MIN_STEP } from './tools.js';
@@ -7,12 +8,16 @@ import { Palette } from './palette.js';
 import { createVHSCPass } from '../shaders/vhsc-three.js';
 import { AttractMode } from './attract.js';
 
-let gestureRecognizer;
 let video;
-let results;
-let lastVideoTime = -1;
-let mpFrameCount = 0;
-const MP_SKIP = 1; // recognize every 2nd webcam frame (~15fps at a 30fps webcam)
+
+// The recognizer runs in a worker (see hands.js) and its results are taken a
+// frame at a time; HandInput keeps each hand on its own controller.
+let handTracker = null;
+let handInput = null;
+
+// How far a fingertip's depth moves its point toward or away from the camera,
+// per unit of the recognizer's z (which is relative to the wrist, and noisy).
+const HAND_DEPTH_SCALE = 5;
 
 // Three.js variables
 let scene, camera, renderer;
@@ -124,6 +129,8 @@ let undoHoldStart = null;
 const UNDO_HOLD_DURATION = 2000; // 2 seconds
 const UNDO_FLICKER_DURATION = 300; // 0.3 seconds
 let undoFlickerStart = null;
+let undoRearmAt = -Infinity; // a hold can't start before the last one's flicker ended
+let undoDoneAt = null;       // when a one-handed hold filled, if it is waiting for a second hand
 let undoOverlay = null;
 let undoCircleLeft = null;
 let undoCircleRight = null;
@@ -151,6 +158,8 @@ let confirmCircleLeft = null;
 let confirmCircleRight = null;
 let confirmHoldStart = null;
 let confirmFlickerStart = null;
+let confirmRearmAt = -Infinity;
+let confirmDoneAt = null;
 let confirmIsDouble = false; // single or double circle
 let pendingConfirmAction = null; // 'single' or 'double'
 
@@ -162,32 +171,48 @@ const ORIENTATION_FADE_DURATION = 5000; // 5 seconds
 async function setupMediaPipe() {
     const container = window._drawingContainer || document;
 
-    // Wait for MediaPipe to be defined on the window
-    while (!window.GestureRecognizer || !window.FilesetResolver) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+    // Once per page: the recognizer (two of them, in the worker) takes seconds
+    // to load, and is kept warm between visits to drawing mode rather than
+    // loaded again -- and leaked -- on each.
+    if (!handTracker) {
+        handTracker = new HandTracker({
+            // CPU, always. MediaPipe's "GPU" delegate is WebGL, not WebGPU,
+            // so `navigator.gpu` -- which Chromium defines on any localhost or
+            // https page whether or not there is a GPU worth the name -- said
+            // nothing about whether to use it, and on a Pi it chose it. There
+            // it shares the one weak GPU with rendering: its shaders take ~9 s
+            // to compile on the first frame, stalling the page, and every frame
+            // after queues behind the scene. The CPU path has a core to itself.
+            delegate: "CPU",
+            numHands: MAX_HANDS
+        });
+        handInput = new HandInput(MAX_HANDS);
     }
+    await handTracker.init();
 
-    // Local, not jsdelivr: the kiosk has to come up without a network. The
-    // files are the 0.10.3 runtime this used to fetch, vendored alongside the
-    // tasks-vision bundle index.html loads.
-    const vision = await window.FilesetResolver.forVisionTasks(
-        "/js/libraries/mediapipe/wasm"
-    );
-
-    gestureRecognizer = await window.GestureRecognizer.createFromOptions(vision, {
-        baseOptions: {
-            // Local copy of the float16/1 model this used to fetch from
-            // storage.googleapis.com -- the last thing drawing mode needed a
-            // network for.
-            modelAssetPath: "/js/libraries/mediapipe/models/gesture_recognizer.task",
-            delegate: navigator.gpu ? "GPU" : "CPU"
-        },
-        runningMode: "VIDEO",
-        numHands: MAX_HANDS
-    });
-    console.log("MediaPipe Loaded");
     const loadingEl = container.querySelector('#loading') || document.getElementById('loading');
     if (loadingEl) loadingEl.style.display = 'none';
+}
+
+// Puts a point from the camera image into the world: on the camera's ray
+// through that spot, so it lands on screen exactly where the fingertip is, at
+// a distance set by the fingertip's depth.
+//
+// It used to be placed on a flat grid at the target's depth and then moved
+// toward or away from the camera by that depth -- which, seen through the
+// perspective camera, also moved it across the screen, outward or inward in
+// proportion to its distance from the centre. The recognizer's depth is the
+// noisiest thing it reports, so every stroke wobbled with it, worst at the
+// edges, and the drawing on screen sat a few percent larger than the hand's
+// path. The grid also assumed the camera was where it starts; orbiting it
+// (alt-drag, WASD) put hands somewhere else entirely.
+const _viewAxis = new THREE.Vector3();
+function placeHandPoint(x, y, z, target) {
+    // The webcam faces the user, so its image is mirrored.
+    target.set(1 - 2 * x, 1 - 2 * y, 0.5).unproject(camera).sub(camera.position).normalize();
+    camera.getWorldDirection(_viewAxis);
+    const along = Math.max(0.5, cameraRadius + z * HAND_DEPTH_SCALE);
+    return target.multiplyScalar(along / Math.max(0.1, target.dot(_viewAxis))).add(camera.position);
 }
 
 function initThreeJS() {
@@ -199,21 +224,15 @@ function initThreeJS() {
     // Set up camera (position set by updateCameraFromSpherical)
     camera = new THREE.PerspectiveCamera(75, DRAW_ASPECT, 0.1, 1000);
 
-    // Set up renderer
-    const size = getDrawSize();
+    // Set up renderer (sized by applyRenderSize, below)
     renderer = new THREE.WebGLRenderer({ antialias: false });
-    // Cap pixel ratio: on HiDPI displays the default (2+) doubles fill-rate
-    // cost for little visible gain at this scene complexity.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
-    renderer.setSize(size.w, size.h);
+    renderer.setPixelRatio(1);
     // Don't append here - startDrawingMode will handle it
 
     // VHSC post-processing: render the scene into a texture, then draw it to
     // the screen through the blur→sharpen→posterize chain.
-    vhscPass = createVHSCPass(
-        Math.round(size.w * Math.min(window.devicePixelRatio, 1.0)),
-        Math.round(size.h * Math.min(window.devicePixelRatio, 1.0))
-    );
+    vhscPass = createVHSCPass(1, 1);
+    applyRenderSize();
 
     // Add some lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
@@ -280,6 +299,7 @@ function initThreeJS() {
         controllerColorRims.push(rim);
 
         const controller = new Controller();
+        controller.placement = placeHandPoint;
         controller.visible = false; // Hide by default
         controller.add(mesh); // Attach the visual indicator to the controller
         controller.add(rim); // Attach the color rim
@@ -316,7 +336,7 @@ function initThreeJS() {
         // Create HTML labels for 3D coordinates and gesture text
         const labelDiv = document.createElement('div');
         labelDiv.className = 'label';
-        labelDiv.style.display = 'none';
+        setDisplay(labelDiv, 'none');
         
         const mainText = document.createElement('div');
         const subText = document.createElement('div');
@@ -395,15 +415,106 @@ function initThreeJS() {
 }
 
 function onWindowResize() {
-    const size = getDrawSize();
     camera.aspect = DRAW_ASPECT;
     camera.updateProjectionMatrix();
-    renderer.setSize(size.w, size.h);
-    if (vhscPass) {
-        vhscPass.renderTarget.setSize(
-            Math.round(size.w * Math.min(window.devicePixelRatio, 1.0)),
-            Math.round(size.h * Math.min(window.devicePixelRatio, 1.0))
-        );
+    applyRenderSize();
+}
+
+// ── Render scale ──
+// The canvas fills the 4:3 box on screen, but what is rendered into it can be
+// smaller and scaled up by the browser: the VHSC pass costs every pixel five
+// texture reads, and on a Raspberry Pi 4 at 1440x1080 that alone is ~15 ms, a
+// whole frame at 60 Hz before anything is drawn. So when frames run long the
+// scale drops a step, and stays down only if that made them faster -- they can
+// be slow for reasons resolution has nothing to do with, and then it goes back
+// up and leaves it a while before trying again. It climbs back a step at a
+// time when there is room. A machine that keeps up never leaves 1; the lowest
+// step still renders more pixels than the 640x480 the drawing is made in.
+const RENDER_SCALES = [1, 0.85, 0.7, 0.6, 0.5];
+let renderScaleIndex = 0;
+const frameIntervals = [];      // ms between frames, this second
+let lastFrameAt = 0;
+let nextScaleCheck = 0;
+let refreshMs = Infinity;       // the display's frame interval, as observed
+let scaleTrial = null;          // {before} while a step down is on trial
+let scaleDownAfter = 0;         // no stepping down before this
+let scaleDownBackoff = 15000;   // doubled each time a step down doesn't help
+let scaleUpAfter = 0;           // no stepping up before this
+let scaleUpBackoff = 10000;     // doubled each time a step up has to be undone
+let lastScaleUpAt = -Infinity;
+let calmChecks = 0;
+
+function applyRenderSize() {
+    const size = getDrawSize();
+    const scale = Math.min(window.devicePixelRatio, 1.0) * RENDER_SCALES[renderScaleIndex];
+    const w = Math.max(1, Math.round(size.w * scale));
+    const h = Math.max(1, Math.round(size.h * scale));
+    renderer.setSize(w, h, false);
+    renderer.domElement.style.width = size.w + 'px';
+    renderer.domElement.style.height = size.h + 'px';
+    if (vhscPass) vhscPass.renderTarget.setSize(w, h);
+}
+
+function resetFrameStats() {
+    frameIntervals.length = 0;
+    lastFrameAt = 0;
+    scaleTrial = null;
+    nextScaleCheck = performance.now() + 2000; // let the page settle first
+}
+
+function setRenderScale(index) {
+    renderScaleIndex = index;
+    applyRenderSize();
+}
+
+function trackFrame(now) {
+    if (lastFrameAt) {
+        const interval = now - lastFrameAt;
+        // A stall -- a tab switch, a garbage collection -- says nothing about load.
+        if (interval < 250) frameIntervals.push(interval);
+    }
+    lastFrameAt = now;
+    if (now < nextScaleCheck) return;
+    nextScaleCheck = now + 1000;
+    if (frameIntervals.length < 10) return;
+
+    const sorted = frameIntervals.slice().sort((a, b) => a - b);
+    frameIntervals.length = 0;
+    refreshMs = Math.max(6, Math.min(refreshMs, sorted[Math.floor(sorted.length * 0.1)]));
+    const interval = sorted[sorted.length >> 1];
+    const slow = interval > refreshMs * 1.3;
+
+    if (scaleTrial) {
+        // A second at the lower scale: keep it if frames came faster.
+        if (interval > scaleTrial.before * 0.85) {
+            setRenderScale(renderScaleIndex - 1);
+            scaleDownAfter = now + scaleDownBackoff;
+            scaleDownBackoff = Math.min(scaleDownBackoff * 2, 300000);
+        } else {
+            scaleDownBackoff = 15000;
+        }
+        scaleTrial = null;
+        calmChecks = 0;
+        return;
+    }
+
+    if (slow) {
+        calmChecks = 0;
+        if (renderScaleIndex < RENDER_SCALES.length - 1 && now >= scaleDownAfter) {
+            // Climbed too far last time: wait longer before climbing again.
+            if (now - lastScaleUpAt < 5000) scaleUpBackoff = Math.min(scaleUpBackoff * 2, 160000);
+            scaleUpAfter = now + scaleUpBackoff;
+            scaleTrial = { before: interval };
+            setRenderScale(renderScaleIndex + 1);
+        }
+    } else if (interval < refreshMs * 1.1) {
+        if (++calmChecks >= 3 && renderScaleIndex > 0 && now >= scaleUpAfter) {
+            calmChecks = 0;
+            lastScaleUpAt = now;
+            setRenderScale(renderScaleIndex - 1);
+        }
+    } else {
+        calmChecks = 0;
     }
 }
 
@@ -525,11 +636,19 @@ async function setupWebcam() {
         const stream = await navigator.mediaDevices.getUserMedia({
             video: { width: 320, height: 240 }
         });
+        if (!isRunning) {
+            // Drawing mode was left while the camera was being asked for.
+            stream.getTracks().forEach(track => track.stop());
+            return;
+        }
+        // ...or left and entered again, so an earlier request got here first.
+        if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
         video.srcObject = stream;
         // Wait for video to be ready
         await new Promise(resolve => {
             video.addEventListener('loadeddata', resolve, { once: true });
         });
+        if (isRunning && handTracker) handTracker.attach(video);
         // Hide loading message
         const loadingEl = container.querySelector('#loading') || document.getElementById('loading');
         if (loadingEl) loadingEl.style.display = 'none';
@@ -540,139 +659,193 @@ async function setupWebcam() {
     }
 }
 
+// One recognizer result: which hand is which, then each controller's filters,
+// signs and buttons, then the strokes they start, extend and end.
+function processHands(result) {
+    const hands = handInput.assign(result);
+    const edges = controllers.map((c, i) => c.measure(result.t, hands[i]));
+
+    if (attractMode) {
+        const anyDown = controllers.some(c =>
+            c.trigger_Down || c.grip_Down || c.buttonA_Down || c.buttonB_Down || c.buttonC_Down);
+        if (anyDown) {
+            if (attractMode.active) attractMode.interrupt();
+            attractMode.resetTimer();
+        }
+    }
+
+    for (let i = 0; i < MAX_HANDS; i++) {
+        driveHandStrokes(i, controllers[i], edges[i], hands[i] !== null && hands[i] !== 'lost');
+    }
+    // While a hand is mid-stroke the tracker keeps to the single-hand
+    // recognizer, which samples it twice as often.
+    handTracker.drawing = controllers.some(c => c.trigger_Held || c.buttonC_Held);
+}
+
+// Each hand draws lines with its trigger (one finger) and filled shapes with
+// button C (two fingers), independently. A stroke is cut where the sign that
+// ended it began, and starts where the sign that started it began -- the
+// controller keeps its recent path for that -- so the moments spent making
+// sure of a sign cost the drawing nothing.
+function driveHandStrokes(i, controller, edges, seen) {
+    const lineId = i;
+    const fillId = 'v' + i;
+
+    // Ends first: switching from one tool to the other ends one stroke and
+    // starts the other on the same result.
+    if (edges.triggerUp && frame.hasActiveStroke(lineId)) frame.endStroke(lineId, controller.triggerCut);
+    if (edges.cUp && frame.hasActiveStroke(fillId)) frame.endStroke(fillId, controller.buttonCCut);
+
+    if (edges.triggerDown) {
+        beginStrokeFromHistory(controller, lineId, controller.triggerFrom, controllerDrawColor[i], false);
+    } else if (seen && controller.trigger_Held && frame.hasActiveStroke(lineId)) {
+        frame.continueStroke(controller.getDrawPosition(_drawPos), lineId, controller.sampleTime);
+    }
+
+    if (edges.cDown) {
+        beginStrokeFromHistory(controller, fillId, controller.buttonCFrom, controllerDrawColor[i], true);
+    } else if (seen && controller.buttonC_Held && frame.hasActiveStroke(fillId)) {
+        frame.continueStroke(controller.getDrawPosition(_drawPos), fillId, controller.sampleTime);
+    }
+}
+
+function beginStrokeFromHistory(controller, id, from, color, closed) {
+    const samples = controller.samplesSince(from);
+    const stroke = samples.length
+        ? frame.beginStroke(controller.samplePosition(samples[0], _drawPos), id, color, samples[0].t)
+        : frame.beginStroke(controller.getDrawPosition(_drawPos), id, color, controller.sampleTime);
+    stroke.closed = closed;
+    for (let k = 1; k < samples.length; k++) {
+        frame.continueStroke(controller.samplePosition(samples[k], _drawPos), id, samples[k].t);
+    }
+}
+
+// Writes a style only when it changes: the loop visits these every frame, and
+// most frames nothing about them has.
+function setDisplay(el, value) {
+    if (el && el._display !== value) {
+        el.style.display = value;
+        el._display = value;
+    }
+}
+
+function setText(el, value) {
+    if (el._text !== value) {
+        el.textContent = value;
+        el._text = value;
+    }
+}
+
+// When a hold of these hands' sign began, and how far it has run. A hold is
+// timed on what the camera saw: from the first sight of the sign -- so the
+// moments spent making sure of it count -- to now, but never more than one
+// result past the latest sight of it, so a hand that drops out of view stops
+// the clock rather than holding on. It used to start over on any frame the
+// sign wasn't read, and one misreading in two seconds is nothing unusual.
+// `rearmAt` keeps a hold that has just fired from counting its own past again.
+function holdSpan(held, rearmAt, now) {
+    let start = Infinity;
+    let seen = -Infinity;
+    for (const c of held) {
+        start = Math.min(start, c.gesture.since);
+        seen = Math.max(seen, c.lastSeen);
+    }
+    const interval = handTracker ? handTracker.interval : 0;
+    return { start: Math.max(start, rearmAt), seen: Math.min(now, seen + interval) };
+}
+
+// A one-handed hold that has filled waits -- up to PARTNER_WAIT -- while
+// another hand in view is making the same sign but hasn't been believed yet:
+// two thumbs rarely read as thumbs on the same result, and firing the
+// one-handed action (recentre, undo) the moment the first filled took away the
+// two-handed one (mint, delete all) the user was halfway through making.
+const PARTNER_WAIT = 1500;
+function waitForPartner(doneAt, now, sign, heldKey) {
+    if (now - doneAt >= PARTNER_WAIT) return false;
+    return controllers.some(c => c.present && !c[heldKey] &&
+        (c.rawGesture === sign || c.gesture.candidate === sign));
+}
+
+function updateHandLabel(label, controller) {
+    setDisplay(label.container, 'block');
+    const handLabel = controller.handedness === 'Left' ? 'Right' : 'Left'; // Mirrored for user
+    setText(label.main, `${handLabel}: ${controller.sign || controller.rawGesture}`);
+    const w = controller.tipWorld;
+    setText(label.sub, w ? `3D World: ${w[0].toFixed(2)}, ${w[1].toFixed(2)}, ${w[2].toFixed(2)}` : '');
+
+    // Position label on screen by converting 3D position back to 2D.
+    // Map NDC onto the centered 4:3 canvas (offset by the letterbox bars).
+    const screenPos = _labelPos.copy(controller.position).project(camera);
+    const drawSize = getDrawSize();
+    const x = drawSize.offsetX + (screenPos.x * .5 + .5) * drawSize.w;
+    const y = drawSize.offsetY + (screenPos.y * -.5 + .5) * drawSize.h;
+    label.container.style.left = `${x}px`;
+    label.container.style.top = `${y - 40}px`; // Offset above the sphere
+}
+const _labelPos = new THREE.Vector3();
+
 // Track animation frame for cleanup
 let animationFrameId = null;
 let isRunning = false;
+let drawingSession = 0; // counts entries, so a slow setup can tell it is stale
 
 // Main animation loop
 function animateLoop() {
     if (!isRunning) return;
     animationFrameId = requestAnimationFrame(animateLoop);
+    const frameStart = performance.now();
+    const dt = lastFrameAt ? Math.min(100, frameStart - lastFrameAt) : 16;
 
     // Update keyboard navigation (WASD)
     updateKeyboardNavigation();
+    // Hands are placed along camera rays, so the camera has to be current.
+    camera.updateMatrixWorld();
 
-    // Run MediaPipe Recognition, throttled to every MP_SKIP-th webcam frame so
-    // the recognizer doesn't run on every animation frame.
-    if (gestureRecognizer && video.readyState >= 2) {
-        let nowInMs = Date.now();
-        if (video.currentTime !== lastVideoTime) {
-            lastVideoTime = video.currentTime; // mark the frame as seen
-            if (++mpFrameCount >= MP_SKIP) {
-                results = gestureRecognizer.recognizeForVideo(video, nowInMs);
-                mpFrameCount = 0;
-            }
+    for (const controller of controllers) controller.beginFrame();
+
+    // Hand tracking: whatever results the recognizer has finished since the
+    // last frame, oldest first. Each is a measurement, and it is taken exactly
+    // once -- strokes grow by one sample per result, not per frame.
+    if (handTracker) {
+        handTracker.pump();
+        for (const result of handTracker.take()) processHands(result);
+    }
+
+    // Pointers, eased between results so they glide rather than jump.
+    const handInterval = handTracker ? handTracker.interval : 33;
+    const chromeVisible = !document.body.classList.contains('ui-hidden');
+    for (let i = 0; i < MAX_HANDS; i++) {
+        const controller = controllers[i];
+        const label = labels[i];
+        controller.visible = controller.present;
+        if (!controller.present) {
+            setDisplay(label.container, 'none');
+            continue;
         }
+        controller.tick(dt, handInterval);
+
+        // Make rim face the camera
+        controllerColorRims[i].lookAt(camera.position);
+
+        // Colour by sign: red for the grip, green for an open hand
+        const sign = controller.sign;
+        pointerMeshes[i].material.color.setHex(
+            sign === 'Closed_Fist' ? 0xff0000 : sign === 'Open_Palm' ? 0x00ff00 : 0xffffff);
+
+        // Slightly scale mesh based on depth
+        pointerMeshes[i].scale.setScalar(Math.max(0.1, 1 - controller.depth * 2));
+
+        // Labels are part of the chrome, and hidden with it; only spend
+        // layout on them when they can be seen.
+        if (chromeVisible) updateHandLabel(label, controller);
+        else setDisplay(label.container, 'none');
     }
 
-    // Hide all controllers and labels initially
-    controllers.forEach(c => c.visible = false);
-    labels.forEach(label => label.container.style.display = 'none');
-
-    // Update controllers and labels based on results
-    if (results && results.landmarks) {
-        // Calculate the physical dimensions of the viewing plane at Z=0
-        const depth = camera.position.z;
-        const vFov = camera.fov * Math.PI / 180;
-        const heightAtDepth = 2 * Math.tan(vFov / 2) * depth;
-        const widthAtDepth = heightAtDepth * camera.aspect;
-
-        for (let i = 0; i < results.landmarks.length && i < MAX_HANDS; i++) {
-            const landmarks = results.landmarks[i];
-            const worldLandmarks = results.worldLandmarks[i];
-            const gestures = results.gestures[i];
-            const handedness = results.handednesses[i];
-
-            // landmark 8 is the index finger tip
-            const pointer = landmarks[8];
-            const worldPos = worldLandmarks[8];
-
-            let handLabel = handedness[0].categoryName === "Left" ? "Right" : "Left"; // Mirrored for user
-            let gestureName = gestures[0].categoryName; // e.g., "Open_Palm", "Closed_Fist"
-            let isClosedFist = (gestureName === "Closed_Fist");
-            let isOpenPalm = (gestureName === "Open_Palm");
-            let isPointingUp = (gestureName === "Pointing_Up");
-            let isThumbUp = (gestureName === "Thumb_Up");
-            let isThumbDown = (gestureName === "Thumb_Down");
-            let isVictory = (gestureName === "Victory");
-
-            const controller = controllers[i];
-            const mesh = pointerMeshes[i];
-            const rim = controllerColorRims[i];
-            controller.visible = true;
-
-            // Make rim face the camera
-            rim.lookAt(camera.position);
-
-            // Update Color based on gesture
-            if (isClosedFist) {
-                mesh.material.color.setHex(0xff0000); // Red
-            } else if (gestureName === "Open_Palm") {
-                mesh.material.color.setHex(0x00ff00); // Green
-            } else {
-                mesh.material.color.setHex(0xffffff); // White
-            }
-
-            // Map MediaPipe normalized coordinates (0 to 1) to NDC (-1 to 1)
-            // Mirror X axis
-            const ndcX = 1 - 2 * pointer.x;
-            const ndcY = 1 - 2 * pointer.y;
-
-            // Scale NDC to world coordinates at Z=0 plane
-            const worldX = (ndcX * widthAtDepth) / 2;
-            const worldY = (ndcY * heightAtDepth) / 2;
-            const worldZ = -pointer.z * 5;
-
-            const newPos = new THREE.Vector3(worldX, worldY, worldZ);
-
-            // Pass the new data into the controller wrapper
-            controller.updatePose(newPos, null);
-            controller.updateGrip(isClosedFist, isOpenPalm);
-            controller.updateTrigger(isPointingUp, isOpenPalm, isClosedFist);
-            controller.updateButtonA(isThumbUp);
-            controller.updateButtonB(isThumbDown);
-            controller.updateButtonC(isVictory);
-
-            // Slightly scale mesh based on depth
-            const scale = 1 - (pointer.z * 2);
-            mesh.scale.setScalar(Math.max(0.1, scale));
-
-            // Update HTML Labels
-            const label = labels[i];
-            label.container.style.display = 'block';
-            label.main.innerText = `${handLabel}: ${gestureName}`;
-            label.sub.innerText = `3D World: ${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)}, ${worldPos.z.toFixed(2)}`;
-
-            // Position label on screen by converting 3D position back to 2D.
-            // Map NDC onto the centered 4:3 canvas (offset by the letterbox bars).
-            const screenPos = controller.position.clone();
-            screenPos.project(camera);
-
-            const drawSize = getDrawSize();
-            const x = drawSize.offsetX + (screenPos.x * .5 + .5) * drawSize.w;
-            const y = drawSize.offsetY + (screenPos.y * -.5 + .5) * drawSize.h;
-
-            label.container.style.left = `${x}px`;
-            label.container.style.top = `${y - 40}px`; // Offset above the sphere
-        }
-    }
-
-    // For hands that are no longer detected, keep grip state unchanged (only open_palm releases)
-    for (let i = results?.landmarks?.length || 0; i < MAX_HANDS; i++) {
-        controllers[i].updatePose(null, null);
-        controllers[i].updateGrip(false, false);
-        controllers[i].updateTrigger(false, false, false);
-        controllers[i].updateButtonA(false);
-        controllers[i].updateButtonB(false);
-        controllers[i].updateButtonC(false);
-    }
-
-    // Interrupt attract mode on any user gesture
+    // Interrupt attract mode on any user input (hand signs are handled as
+    // they arrive, in processHands, so the drawing is cleared before a
+    // stroke starts rather than after)
     if (attractMode) {
-        const anyDown = controllers.some(c =>
-            c.trigger_Down || c.grip_Down || c.buttonA_Down || c.buttonB_Down || c.buttonC_Down
-        ) || (mouseController && mouseController.trigger_Down);
-        if (anyDown) {
+        if (mouseController && mouseController.trigger_Down) {
             if (attractMode.active) attractMode.interrupt();
             attractMode.resetTimer();
         }
@@ -681,49 +854,6 @@ function animateLoop() {
         ) || (mouseController && mouseController.trigger_Held) ||
             Object.values(keysPressed).some(v => v);
         if (anyHeld) attractMode.resetTimer();
-    }
-
-    // Drawing logic - each controller can draw independently
-    // Uses drawing position (50% smoothing - more responsive)
-    for (let i = 0; i < MAX_HANDS; i++) {
-        const controller = controllers[i];
-
-        // Start new stroke on trigger_Down
-        if (controller.trigger_Down) {
-            const pos = _drawPos;
-            controller.getDrawPosition(pos);
-            frame.beginStroke(pos, i, controllerDrawColor[i]);
-        }
-        // Continue stroke while trigger_Held
-        else if (controller.trigger_Held && frame.hasActiveStroke(i)) {
-            const pos = _drawPos;
-            controller.getDrawPosition(pos);
-            frame.continueStroke(pos, i);
-        }
-        // End stroke on trigger_Up
-        else if (controller.trigger_Up) {
-            frame.endStroke(i);
-        }
-    }
-
-    // V-gesture (Victory / buttonC) drawing — closed filled polygons.
-    // Separate from trigger drawing so the two gestures can diverge later.
-    for (let i = 0; i < MAX_HANDS; i++) {
-        const controller = controllers[i];
-        const vStrokeId = 'v' + i;
-
-        if (controller.buttonC_Down) {
-            const pos = _drawPos;
-            controller.getDrawPosition(pos);
-            const stroke = frame.beginStroke(pos, vStrokeId, controllerDrawColor[i]);
-            stroke.closed = true;
-        } else if (controller.buttonC_Held && frame.hasActiveStroke(vStrokeId)) {
-            const pos = _drawPos;
-            controller.getDrawPosition(pos);
-            frame.continueStroke(pos, vStrokeId);
-        } else if (controller.buttonC_Up) {
-            frame.endStroke(vStrokeId);
-        }
     }
 
     // Mouse controller update and drawing
@@ -981,13 +1111,13 @@ function animateLoop() {
             // Two circles side by side
             undoCircleLeft.style.transform = `translate(calc(-50% - ${offset}px), -50%) scale(${scale})`;
             undoCircleRight.style.transform = `translate(calc(-50% + ${offset}px), -50%) scale(${scale})`;
-            undoCircleLeft.style.display = 'block';
-            undoCircleRight.style.display = 'block';
+            setDisplay(undoCircleLeft, 'block');
+            setDisplay(undoCircleRight, 'block');
         } else {
             // Single centered circle (use left circle only)
             undoCircleLeft.style.transform = baseTransform;
-            undoCircleLeft.style.display = 'block';
-            undoCircleRight.style.display = 'none';
+            setDisplay(undoCircleLeft, 'block');
+            setDisplay(undoCircleRight, 'none');
         }
     };
 
@@ -997,33 +1127,22 @@ function animateLoop() {
         if (flickerElapsed < UNDO_FLICKER_DURATION) {
             // Flicker on/off every 50ms
             const flickerOn = Math.floor(flickerElapsed / 50) % 2 === 0;
-            undoOverlay.style.display = flickerOn ? 'block' : 'none';
+            setDisplay(undoOverlay, flickerOn ? 'block' : 'none');
             if (flickerOn) {
                 updateCirclePositions(UNDO_CIRCLE_MIN_SCALE, pendingAction === 'reset');
             }
         } else {
             // Flicker done - action already performed by Frame flicker methods
             const wasReset = pendingAction === 'reset';
-            undoOverlay.style.display = 'none';
-            undoCircleLeft.style.display = 'none';
-            undoCircleRight.style.display = 'none';
+            setDisplay(undoOverlay, 'none');
+            setDisplay(undoCircleLeft, 'none');
+            setDisplay(undoCircleRight, 'none');
             undoFlickerStart = null;
             undoHoldStart = null;
             pendingAction = null;
-            // Reset all button states on both controllers
-            for (const controller of controllers) {
-                controller.grip_Down = false;
-                controller.grip_Held = false;
-                controller.trigger_Down = false;
-                controller.trigger_Held = false;
-                controller.trigger_Up = false;
-                controller.buttonA_Down = false;
-                controller.buttonA_Held = false;
-                controller.buttonB_Down = false;
-                controller.buttonB_Held = false;
-                controller.buttonC_Down = false;
-                controller.buttonC_Held = false;
-            }
+            // The buttons follow the hands' signs, so there is nothing to
+            // reset: a thumb still down starts a fresh hold from here.
+            undoRearmAt = now;
             // Reset orientation objects fade if this was a full reset
             if (wasReset) {
                 orientationFadeStart = now;
@@ -1039,24 +1158,28 @@ function animateLoop() {
         // If it switches from single to both during hold, upgrade to reset
         const currentAction = bothButtonBHeld ? 'reset' : 'undo';
 
+        const span = holdSpan(controllers.filter(c => c.buttonB_Held), undoRearmAt, now);
         if (undoHoldStart === null) {
-            undoHoldStart = now;
+            undoHoldStart = span.start;
             pendingAction = currentAction;
         } else if (currentAction === 'reset') {
             // Upgrade to reset if both are now held
             pendingAction = 'reset';
         }
 
-        const holdElapsed = now - undoHoldStart;
-        const progress = Math.min(holdElapsed / UNDO_HOLD_DURATION, 1);
+        const holdElapsed = span.seen - undoHoldStart;
+        const progress = Math.max(0, Math.min(holdElapsed / UNDO_HOLD_DURATION, 1));
 
         // Show and shrink circle(s)
-        undoOverlay.style.display = 'block';
+        setDisplay(undoOverlay, 'block');
         const scale = 1 - progress * (1 - UNDO_CIRCLE_MIN_SCALE);
         updateCirclePositions(scale, pendingAction === 'reset');
 
         // Timer complete - start flicker for both circle and strokes
-        if (progress >= 1) {
+        if (progress >= 1 && pendingAction === 'undo' && waitForPartner(undoDoneAt ??= now, now, 'Thumb_Down', 'buttonB_Held')) {
+            // A second thumb is on its way: this is a delete-all in the making
+        } else if (progress >= 1) {
+            undoDoneAt = null;
             undoFlickerStart = now;
             // Start stroke/frame flicker in parallel with circle flicker
             if (pendingAction === 'reset') {
@@ -1070,10 +1193,11 @@ function animateLoop() {
         // Button released - cancel action
         if (undoFlickerStart === null) {
             undoHoldStart = null;
+            undoDoneAt = null;
             pendingAction = null;
-            undoOverlay.style.display = 'none';
-            undoCircleLeft.style.display = 'none';
-            undoCircleRight.style.display = 'none';
+            setDisplay(undoOverlay, 'none');
+            setDisplay(undoCircleLeft, 'none');
+            setDisplay(undoCircleRight, 'none');
         }
     }
 
@@ -1090,20 +1214,20 @@ function animateLoop() {
             // Two circles side by side
             if (confirmCircleLeft) {
                 confirmCircleLeft.style.transform = `translate(calc(-50% - ${offset}px), -50%) scale(${scale})`;
-                confirmCircleLeft.style.display = 'block';
+                setDisplay(confirmCircleLeft, 'block');
             }
             if (confirmCircleRight) {
                 confirmCircleRight.style.transform = `translate(calc(-50% + ${offset}px), -50%) scale(${scale})`;
-                confirmCircleRight.style.display = 'block';
+                setDisplay(confirmCircleRight, 'block');
             }
         } else {
             // Single centered circle
             if (confirmCircleLeft) {
                 confirmCircleLeft.style.transform = baseTransform;
-                confirmCircleLeft.style.display = 'block';
+                setDisplay(confirmCircleLeft, 'block');
             }
             if (confirmCircleRight) {
-                confirmCircleRight.style.display = 'none';
+                setDisplay(confirmCircleRight, 'none');
             }
         }
     };
@@ -1114,24 +1238,20 @@ function animateLoop() {
         if (flickerElapsed < UNDO_FLICKER_DURATION) {
             // Flicker on/off every 50ms
             const flickerOn = Math.floor(flickerElapsed / 50) % 2 === 0;
-            if (confirmOverlay) confirmOverlay.style.display = flickerOn ? 'block' : 'none';
+            setDisplay(confirmOverlay, flickerOn ? 'block' : 'none');
             if (flickerOn) {
                 updateConfirmCirclePositions(1, pendingConfirmAction === 'double');
             }
         } else {
             // Flicker done
             const wasSingle = pendingConfirmAction === 'single';
-            if (confirmOverlay) confirmOverlay.style.display = 'none';
-            if (confirmCircleLeft) confirmCircleLeft.style.display = 'none';
-            if (confirmCircleRight) confirmCircleRight.style.display = 'none';
+            setDisplay(confirmOverlay, 'none');
+            setDisplay(confirmCircleLeft, 'none');
+            setDisplay(confirmCircleRight, 'none');
             confirmFlickerStart = null;
             confirmHoldStart = null;
             pendingConfirmAction = null;
-            // Reset button states
-            for (const controller of controllers) {
-                controller.buttonA_Down = false;
-                controller.buttonA_Held = false;
-            }
+            confirmRearmAt = now;
             // Single Button A = camera reset + world reset + show orientation objects
             if (wasSingle) {
                 // Reset camera
@@ -1158,34 +1278,39 @@ function animateLoop() {
     else if (bothButtonAHeld || singleButtonAHeld) {
         const currentAction = bothButtonAHeld ? 'double' : 'single';
 
+        const span = holdSpan(controllers.filter(c => c.buttonA_Held), confirmRearmAt, now);
         if (confirmHoldStart === null) {
-            confirmHoldStart = now;
+            confirmHoldStart = span.start;
             pendingConfirmAction = currentAction;
         } else if (currentAction === 'double') {
             // Upgrade to double if both are now held
             pendingConfirmAction = 'double';
         }
 
-        const holdElapsed = now - confirmHoldStart;
-        const progress = Math.min(holdElapsed / UNDO_HOLD_DURATION, 1);
+        const holdElapsed = span.seen - confirmHoldStart;
+        const progress = Math.max(0, Math.min(holdElapsed / UNDO_HOLD_DURATION, 1));
 
         // Show and expand circle(s) (reverse of shrink)
-        if (confirmOverlay) confirmOverlay.style.display = 'block';
+        setDisplay(confirmOverlay, 'block');
         const scale = UNDO_CIRCLE_MIN_SCALE + progress * (1 - UNDO_CIRCLE_MIN_SCALE);
         updateConfirmCirclePositions(scale, pendingConfirmAction === 'double');
 
         // Timer complete - start flicker
-        if (progress >= 1) {
+        if (progress >= 1 && pendingConfirmAction === 'single' && waitForPartner(confirmDoneAt ??= now, now, 'Thumb_Up', 'buttonA_Held')) {
+            // A second thumb is on its way: this is a mint in the making
+        } else if (progress >= 1) {
+            confirmDoneAt = null;
             confirmFlickerStart = now;
         }
     } else {
         // Button released - cancel action
         if (confirmFlickerStart === null) {
             confirmHoldStart = null;
+            confirmDoneAt = null;
             pendingConfirmAction = null;
-            if (confirmOverlay) confirmOverlay.style.display = 'none';
-            if (confirmCircleLeft) confirmCircleLeft.style.display = 'none';
-            if (confirmCircleRight) confirmCircleRight.style.display = 'none';
+            setDisplay(confirmOverlay, 'none');
+            setDisplay(confirmCircleLeft, 'none');
+            setDisplay(confirmCircleRight, 'none');
         }
     }
 
@@ -1212,6 +1337,10 @@ function animateLoop() {
     // Attract mode: draw random NAPLPS files when idle
     if (attractMode) attractMode.update();
 
+    // Strokes being drawn are rebuilt here, once, however many points they
+    // gained since the last frame.
+    frame.flush();
+
     // Two-pass render: scene → offscreen target, then VHSC shader → screen.
     if (vhscPass) {
         renderer.setRenderTarget(vhscPass.renderTarget);
@@ -1221,6 +1350,8 @@ function animateLoop() {
     } else {
         renderer.render(scene, camera);
     }
+
+    trackFrame(frameStart);
 }
 
 // Export functions for external control
@@ -1231,6 +1362,7 @@ export function armDelete() {
 export async function startDrawingMode(container) {
     if (isRunning) return;
     isRunning = true;
+    const session = ++drawingSession;
 
     // Store reference to container for cleanup
     window._drawingContainer = container;
@@ -1256,12 +1388,12 @@ export async function startDrawingMode(container) {
     container.appendChild(renderer.domElement);
 
     // Ensure renderer is sized correctly (4:3, centered within the container)
-    const size = getDrawSize();
-    renderer.setSize(size.w, size.h);
     if (camera) {
         camera.aspect = DRAW_ASPECT;
         camera.updateProjectionMatrix();
     }
+    applyRenderSize();
+    resetFrameStats();
 
     // Update labelsContainer reference for this container
     labelsContainer = container.querySelector('#labels-container') || document.getElementById('labels-container');
@@ -1312,8 +1444,8 @@ export async function startDrawingMode(container) {
     if (attractMode) attractMode.resetTimer();
 
     // Start rendering before the async setup so the scene is visible
-    // immediately — the animate loop guards on gestureRecognizer/results,
-    // so it is safe to run without MediaPipe.
+    // immediately — the animate loop runs without hands until the
+    // recognizer is ready.
     animateLoop();
 
     if (_armDelete) {
@@ -1322,13 +1454,24 @@ export async function startDrawingMode(container) {
         resetCamera();
     }
 
-    await setupMediaPipe();
-    await setupWebcam();
-
-    // Enable mouse controller
+    // The mouse draws from the start; it used to wait for the recognizer,
+    // which takes several seconds to load on a Pi and might not load at all.
     if (mouseController) {
         mouseController.enable();
     }
+
+    try {
+        await setupMediaPipe();
+    } catch (err) {
+        console.error('[nap-xtz] hand tracking unavailable:', err);
+        const loading = container.querySelector('#loading') || document.getElementById('loading');
+        if (loading) loading.innerText = 'Hand tracking unavailable';
+        return;
+    }
+    // Left (and perhaps come back) while the recognizer loaded: this session
+    // has nothing more to set up.
+    if (session !== drawingSession || !isRunning) return;
+    await setupWebcam();
 }
 
 export function stopDrawingMode() {
@@ -1356,14 +1499,25 @@ export function stopDrawingMode() {
     }
 
     // Stop webcam
+    if (handTracker) handTracker.detach();
     if (video && video.srcObject) {
         video.srcObject.getTracks().forEach(track => track.stop());
         video.srcObject = null;
     }
 
+    // Let go of the hands, and of any stroke they were halfway through: it
+    // wasn't in the drawing just encoded, and the hand won't be where it was
+    // when drawing mode next opens.
+    for (let i = 0; i < controllers.length; i++) {
+        controllers[i].release();
+        for (const id of [i, 'v' + i]) {
+            if (frame.hasActiveStroke(id)) frame.endStroke(id, -Infinity);
+        }
+    }
+
     // Hide labels
     labels.forEach(label => {
-        if (label.container) label.container.style.display = 'none';
+        if (label.container) setDisplay(label.container, 'none');
     });
 
     hideGestureCard(); // the overlay is going, so a fade shouldn't outlive it

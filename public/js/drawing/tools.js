@@ -1,8 +1,23 @@
 import * as THREE from 'three';
 
-// Number of points to trim from start and end of each stroke
-const pointsTrimStart = 1;
-const pointsTrimEnd = 5;
+// There used to be a fixed trim here -- the first point and the last five of
+// every stroke -- to lose the few frames in which a hand changes sign. Five
+// frames was 80 ms at sixty frames a second and two seconds at the two and a
+// half a Pi managed with the recognizer on the main thread, which cut most of
+// a stroke off; it also clipped attract mode's replays and the mouse, neither
+// of which has a sign to change. Points now carry the time they were measured,
+// and whoever ends a stroke says where it ended (see endStroke).
+
+// Points of a stroke closer together than this, in the stroke's own units, are
+// one point: a hand held still would otherwise pile up samples on one spot,
+// which cost bytes and bunch the taper.
+const MIN_POINT_SPACING = 0.01;
+
+// refine() puts a smooth curve through a stroke's samples, at about this
+// spacing (in the stroke's own units: the view is ~10 across). A hand tracked
+// five times a second draws a circle as a pentagon; this is what rounds it.
+const CURVE_SPACING = 0.04;
+const CURVE_MAX_STEPS = 16; // per segment between samples
 
 // Flicker duration and interval for undo/clear animations
 const FLICKER_DURATION = 300; // ms
@@ -48,23 +63,64 @@ export const BRUSH_SIMPLIFY = MIN_STEP;
 export class Stroke {
     constructor(color = 0xffffff) {
         this.points = [];
+        this.times = [];       // when each point was measured, ms (NaN if nobody said)
         this.color = color;
-        this.smoothReps = 10;
-        this.splitReps = 2;
+        this.smoothReps = 4;   // light smoothing after the curve fit (see refine)
         this.thickness = 0.25; // Brush thickness
         this.pressures = [];   // Pressure values per point (0-1)
         this.taperPower = 0.4; // Taper exponent for ends
         this.minThickness = 0.3; // Minimum thickness multiplier
         this.normalOffset = 0; // 3D preview only -- see offsetAlongNormal()
         this.closed = false;   // When true the polyline is a closed filled polygon
+        this._arc = [];        // distance along the stroke to each point
+        this._length = 0;
+        this._near = null;     // the last point too close to keep (see keepDot)
     }
 
     /**
-     * Adds a point to the stroke
+     * Adds a point to the stroke, unless it is on top of the last one
      * @param {THREE.Vector3} point - Position to add
+     * @param {number} [time] - When it was measured, ms
+     * @returns {boolean} True if the point was kept
      */
-    addPoint(point) {
+    addPoint(point, time = NaN) {
+        const last = this.points[this.points.length - 1];
+        if (last && last.distanceToSquared(point) < MIN_POINT_SPACING * MIN_POINT_SPACING) {
+            // Kept aside: if the stroke never gets further than this, it is a
+            // dot, and a dot is still a mark (see keepDot).
+            this._near = { point: point.clone(), time };
+            return false;
+        }
         this.points.push(point.clone());
+        this.times.push(time);
+        this._near = null;
+        return true;
+    }
+
+    /**
+     * A stroke that never left the spot it started on is a dot: give it back
+     * the second point addPoint() set aside, so it is drawn rather than lost.
+     * Replayed drawings are full of them.
+     */
+    keepDot() {
+        if (this.points.length === 1 && this._near) {
+            this.points.push(this._near.point);
+            this.times.push(this._near.time);
+        }
+    }
+
+    /**
+     * Drops the points measured after `time` -- the tail a hand draws while it
+     * changes to the sign that ends the stroke.
+     * @param {number} time - ms; points with no time are kept
+     */
+    trimAfter(time) {
+        if (this._near && this._near.time > time) this._near = null;
+        let n = this.points.length;
+        while (n > 0 && this.times[n - 1] > time) n--;
+        this.points.length = n;
+        this.times.length = n;
+        this.pressures = [];
     }
 
     /**
@@ -91,6 +147,14 @@ export class Stroke {
      * @returns {THREE.BufferGeometry} The fill geometry
      */
     toFillGeometry() {
+        return toGeometry(this.fillArrays());
+    }
+
+    /**
+     * The fill as raw arrays, for toFillGeometry() or the Frame's batch.
+     * @returns {?{positions: Float32Array, indices: number[]}}
+     */
+    fillArrays() {
         if (this.points.length < 3) return null;
 
         // Calculate best-fit plane normal using Newell's method
@@ -119,33 +183,18 @@ export class Stroke {
         ));
 
         // Use Three.js ShapeUtils for triangulation
-        const indices = THREE.ShapeUtils.triangulateShape(points2D, []);
+        const triangles = THREE.ShapeUtils.triangulateShape(points2D, []);
 
         // Build geometry with original 3D points
-        const vertices = [];
-        for (const p of this.points) {
-            vertices.push(p.x, p.y, p.z);
+        const positions = new Float32Array(this.points.length * 3);
+        for (let i = 0; i < this.points.length; i++) {
+            const p = this.points[i];
+            positions[i * 3] = p.x;
+            positions[i * 3 + 1] = p.y;
+            positions[i * 3 + 2] = p.z;
         }
-
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-        geometry.setIndex(indices.flat());
-        geometry.computeVertexNormals();
-
-        return geometry;
-    }
-
-    /**
-     * Subdivides the stroke by inserting midpoints between each pair of points
-     */
-    splitStroke() {
-        for (let i = 1; i < this.points.length; i += 2) {
-            const x = (this.points[i].x + this.points[i - 1].x) / 2;
-            const y = (this.points[i].y + this.points[i - 1].y) / 2;
-            const z = (this.points[i].z + this.points[i - 1].z) / 2;
-            const p = new THREE.Vector3(x, y, z);
-            this.points.splice(i, 0, p);
-        }
+        // No normals: every material that draws strokes is unlit.
+        return { positions, indices: triangles.flat() };
     }
 
     /**
@@ -168,20 +217,25 @@ export class Stroke {
     }
 
     /**
-     * Refines the stroke by splitting and smoothing multiple times
+     * Refines the stroke: a smooth curve through its samples, then a little
+     * smoothing.
+     *
+     * It used to split every segment in half twice and smooth ten times, which
+     * rounded a stroke sampled sixty times a second nicely enough but left one
+     * sampled five times a second -- a hand on a Pi -- as the polygon it was
+     * sampled as, only with more points. A centripetal Catmull-Rom spline goes
+     * through every sample the hand gave and bends between them the way the
+     * hand did, however far apart they are (see catmullRom below).
      */
     refine() {
         if (this.points.length < 2) return;
 
-        // First do splitReps iterations of split + smooth
-        for (let i = 0; i < this.splitReps; i++) {
-            this.splitStroke();
+        this.points = catmullRom(this.points, CURVE_SPACING, CURVE_MAX_STEPS);
+        this.times = [];
+        for (let i = 0; i < this.smoothReps; i++) {
             this.smoothStroke();
         }
-        // Then do remaining smooth-only iterations
-        for (let i = 0; i < this.smoothReps - this.splitReps; i++) {
-            this.smoothStroke();
-        }
+        this.pressures = [];
     }
 
     /**
@@ -237,18 +291,42 @@ export class Stroke {
     /**
      * Computes pressure values for each point based on position in stroke
      * Tapers at both ends using a sine-based falloff
+     *
+     * Position is distance along the stroke, not point count. By count, a
+     * stroke's width followed how often it happened to be sampled -- a slow
+     * start crowded with samples came out long and thin, a fast finish short
+     * and fat -- and the samples come at whatever rate the machine manages.
      */
     computePressures() {
         this.pressures = [];
+        this._measure();
         const n = this.points.length;
-        if (n === 0) return;
 
         for (let i = 0; i < n; i++) {
             // Sine-based pressure: peaks in middle, tapers at ends
-            const t = i / Math.max(1, n - 1) * Math.PI;
+            const t = this._position(i) * Math.PI;
             const pressure = Math.sqrt((1.0 - Math.cos(t)) * 0.5);
             this.pressures.push(pressure);
         }
+    }
+
+    // Distance along the stroke to each point.
+    _measure() {
+        this._arc = [];
+        let s = 0;
+        for (let i = 0; i < this.points.length; i++) {
+            if (i > 0) s += this.points[i].distanceTo(this.points[i - 1]);
+            this._arc.push(s);
+        }
+        this._length = s;
+    }
+
+    // How far along the stroke point i is, 0..1 (by count if it has no length).
+    _position(i) {
+        const n = this.points.length;
+        if (this._arc.length !== n) this._measure();
+        if (this._length > 1e-9) return this._arc[i] / this._length;
+        return i / Math.max(1, n - 1);
     }
 
     /**
@@ -264,7 +342,7 @@ export class Stroke {
         if (this.pressures.length !== this.points.length) {
             this.computePressures();
         }
-        const taper = Math.pow((lastIndex - i) / Math.max(1, lastIndex), this.taperPower);
+        const taper = Math.pow(1 - this._position(i), this.taperPower);
         const pressure = this.pressures[i] || 1.0;
         return Math.max(this.minThickness * this.thickness, taper * pressure * this.thickness);
     }
@@ -275,6 +353,17 @@ export class Stroke {
      * @returns {THREE.BufferGeometry} The brush geometry
      */
     toBrushGeometry() {
+        return toGeometry(this.brushArrays());
+    }
+
+    /**
+     * The brush ribbon as raw arrays, for toBrushGeometry() or the Frame's batch.
+     * Left edge then right edge, two triangles per segment; built into typed
+     * arrays with scratch vectors, since the stroke being drawn is rebuilt every
+     * time it gains a point.
+     * @returns {?{positions: Float32Array, indices: Uint32Array}}
+     */
+    brushArrays() {
         if (this.points.length < 2) return null;
 
         // Compute pressures if not already set
@@ -283,22 +372,18 @@ export class Stroke {
         }
 
         const normal = this.computeNormal();
-        const vertices = [];
-        const indices = [];
-
         const nPoints = this.points.length;
         const lastIndex = nPoints - 1;
-
-        // Arrays to store left and right edge points
-        const leftEdge = [];
-        const rightEdge = [];
+        const positions = new Float32Array(nPoints * 6);
+        const indices = new Uint32Array((nPoints - 1) * 6);
+        const tangent = _tangent;
+        const perp = _perp;
 
         for (let i = 0; i < nPoints; i++) {
             const p = this.points[i];
             const radius = this.radiusAt(i);
 
             // Calculate tangent direction
-            let tangent = new THREE.Vector3();
             if (i === 0) {
                 // First point: direction to next
                 tangent.subVectors(this.points[1], p);
@@ -321,27 +406,22 @@ export class Stroke {
             // along its own normal -- drawn straight at the camera, say -- has no
             // perpendicular there, so fall back to one across the tangent rather
             // than let the ribbon collapse to nothing.
-            const perp = new THREE.Vector3().crossVectors(tangent, normal);
+            perp.crossVectors(tangent, normal);
             if (perp.lengthSq() < 1e-8) {
                 perp.set(-tangent.y, tangent.x, 0);
                 if (perp.lengthSq() < 1e-8) perp.set(0, 1, 0);
             }
             perp.normalize();
 
-            // Create left and right edge points
-            const left = p.clone().addScaledVector(perp, radius);
-            const right = p.clone().addScaledVector(perp, -radius);
-
-            leftEdge.push(left);
-            rightEdge.push(right);
-        }
-
-        // Build vertices array (left edge then right edge)
-        for (let i = 0; i < nPoints; i++) {
-            vertices.push(leftEdge[i].x, leftEdge[i].y, leftEdge[i].z);
-        }
-        for (let i = 0; i < nPoints; i++) {
-            vertices.push(rightEdge[i].x, rightEdge[i].y, rightEdge[i].z);
+            // Left edge at i, right edge at nPoints + i
+            const l = i * 3;
+            const r = (nPoints + i) * 3;
+            positions[l] = p.x + perp.x * radius;
+            positions[l + 1] = p.y + perp.y * radius;
+            positions[l + 2] = p.z + perp.z * radius;
+            positions[r] = p.x - perp.x * radius;
+            positions[r + 1] = p.y - perp.y * radius;
+            positions[r + 2] = p.z - perp.z * radius;
         }
 
         // Build quad indices (two triangles per quad)
@@ -350,20 +430,16 @@ export class Stroke {
             const l1 = i + 1;           // left edge, next
             const r0 = nPoints + i;     // right edge, current
             const r1 = nPoints + i + 1; // right edge, next
+            const k = i * 6;
 
             // Triangle 1: l0, r0, l1
-            indices.push(l0, r0, l1);
+            indices[k] = l0; indices[k + 1] = r0; indices[k + 2] = l1;
             // Triangle 2: l1, r0, r1
-            indices.push(l1, r0, r1);
+            indices[k + 3] = l1; indices[k + 4] = r0; indices[k + 5] = r1;
         }
 
-        // Create geometry
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-        geometry.setIndex(indices);
-        geometry.computeVertexNormals();
-
-        return geometry;
+        // No normals: every material that draws strokes is unlit.
+        return { positions, indices };
     }
 
     /**
@@ -434,6 +510,207 @@ export class Stroke {
     }
 }
 
+// Scratch vectors for brushArrays(), which runs once per point drawn.
+const _tangent = new THREE.Vector3();
+const _perp = new THREE.Vector3();
+const _color = new THREE.Color();
+
+function toGeometry(arrays) {
+    if (!arrays) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(arrays.positions, 3));
+    geometry.setIndex(Array.isArray(arrays.indices) ? arrays.indices : new THREE.BufferAttribute(arrays.indices, 1));
+    return geometry;
+}
+
+/**
+ * A centripetal Catmull-Rom spline through `points`, sampled every `spacing`
+ * or so (at most `maxSteps` pieces between two points). It passes through
+ * every point it is given, and the centripetal form (alpha 0.5) neither loops
+ * nor overshoots where samples bunch up or a stroke turns sharply -- which the
+ * uniform form does, and which a slow machine's widely spaced samples ask for.
+ * @param {THREE.Vector3[]} points
+ * @param {number} spacing
+ * @param {number} maxSteps
+ * @returns {THREE.Vector3[]} New points (the input is left alone)
+ */
+export function catmullRom(points, spacing, maxSteps) {
+    const n = points.length;
+    if (n < 3) return points.map(p => p.clone());
+
+    const out = [points[0].clone()];
+    const p0 = new THREE.Vector3();
+    const p3 = new THREE.Vector3();
+    for (let i = 0; i < n - 1; i++) {
+        const p1 = points[i];
+        const p2 = points[i + 1];
+        // Past either end, a phantom point continuing the end segment.
+        if (i > 0) p0.copy(points[i - 1]); else p0.copy(p1).multiplyScalar(2).sub(p2);
+        if (i < n - 2) p3.copy(points[i + 2]); else p3.copy(p2).multiplyScalar(2).sub(p1);
+
+        const steps = Math.min(maxSteps, Math.max(1, Math.ceil(p1.distanceTo(p2) / spacing)));
+        const t1 = Math.sqrt(Math.max(p0.distanceTo(p1), 1e-9));
+        const t2 = t1 + Math.sqrt(Math.max(p1.distanceTo(p2), 1e-9));
+        const t3 = t2 + Math.sqrt(Math.max(p2.distanceTo(p3), 1e-9));
+        for (let k = 1; k <= steps; k++) {
+            if (k === steps) {
+                out.push(p2.clone());
+                break;
+            }
+            const t = t1 + (t2 - t1) * k / steps;
+            out.push(barryGoldman(p0, p1, p2, p3, 0, t1, t2, t3, t));
+        }
+    }
+    return out;
+}
+
+// One point of a Catmull-Rom segment, by Barry and Goldman's pyramid, with
+// the knots at t0..t3. Worked per axis rather than with vectors, since the
+// stroke being drawn is refitted every time it gains a point.
+function barryGoldman(p0, p1, p2, p3, t0, t1, t2, t3, t) {
+    const a1 = (t1 - t) / (t1 - t0), a1b = (t - t0) / (t1 - t0);
+    const a2 = (t2 - t) / (t2 - t1), a2b = (t - t1) / (t2 - t1);
+    const a3 = (t3 - t) / (t3 - t2), a3b = (t - t2) / (t3 - t2);
+    const b1 = (t2 - t) / (t2 - t0), b1b = (t - t0) / (t2 - t0);
+    const b2 = (t3 - t) / (t3 - t1), b2b = (t - t1) / (t3 - t1);
+    const axis = (v0, v1, v2, v3) => {
+        const A1 = a1 * v0 + a1b * v1;
+        const A2 = a2 * v1 + a2b * v2;
+        const A3 = a3 * v2 + a3b * v3;
+        return a2 * (b1 * A1 + b1b * A2) + a2b * (b2 * A2 + b2b * A3);
+    };
+    return new THREE.Vector3(
+        axis(p0.x, p1.x, p2.x, p3.x),
+        axis(p0.y, p1.y, p2.y, p3.y),
+        axis(p0.z, p1.z, p2.z, p3.z)
+    );
+}
+
+/**
+ * Every completed stroke in one mesh: one buffer of positions and colours,
+ * one draw call.
+ *
+ * Each stroke had a mesh of its own, and each mesh is a draw call. Attract
+ * mode replays drawings of 600 to 1900 polygons, and on a Raspberry Pi 4 six
+ * hundred draw calls cost 10 ms of every frame before the GPU drew a pixel.
+ * Strokes only ever come and go at the end -- endStroke() appends, undo()
+ * pops -- so a stroke is written once, into the space after the last one, and
+ * only that part of the buffer goes to the GPU.
+ */
+class StrokeBatch {
+    constructor(parent) {
+        this.material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+        this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
+        this.mesh.frustumCulled = false;
+        parent.add(this.mesh);
+
+        this.vertexCount = 0;
+        this.indexCount = 0;
+        this.ranges = [];     // per appended stroke: where it starts
+        this._positions = new Float32Array(0);
+        this._colors = new Float32Array(0);
+        this._indices = new Uint32Array(0);
+        this._reserve(8192, 16384);
+    }
+
+    get count() {
+        return this.ranges.length;
+    }
+
+    /**
+     * @param {?{positions: Float32Array, indices: ArrayLike<number>}} arrays
+     *   null for a stroke with no geometry, which still takes a place so the
+     *   batch stays in step with Frame.strokes
+     * @param {number} color - hex
+     * @param {THREE.Vector3} offset - added to every position (the preview offset)
+     */
+    append(arrays, color, offset) {
+        this.ranges.push({ vertex: this.vertexCount, index: this.indexCount });
+        if (!arrays) return;
+
+        const vn = arrays.positions.length / 3;
+        const inCount = arrays.indices.length;
+        this._reserve(this.vertexCount + vn, this.indexCount + inCount);
+
+        // Colours as the material would have held them: MeshBasicMaterial's
+        // colour is converted out of sRGB, vertex colours are used as given.
+        _color.setHex(color);
+        const v0 = this.vertexCount;
+        const pos = this._positions;
+        const col = this._colors;
+        const src = arrays.positions;
+        for (let i = 0; i < vn; i++) {
+            const k = (v0 + i) * 3;
+            pos[k] = src[i * 3] + offset.x;
+            pos[k + 1] = src[i * 3 + 1] + offset.y;
+            pos[k + 2] = src[i * 3 + 2] + offset.z;
+            col[k] = _color.r;
+            col[k + 1] = _color.g;
+            col[k + 2] = _color.b;
+        }
+        const idx = this._indices;
+        const i0 = this.indexCount;
+        for (let i = 0; i < inCount; i++) idx[i0 + i] = arrays.indices[i] + v0;
+
+        const geometry = this.mesh.geometry;
+        const position = geometry.getAttribute('position');
+        const colorAttr = geometry.getAttribute('color');
+        position.addUpdateRange(v0 * 3, vn * 3);
+        colorAttr.addUpdateRange(v0 * 3, vn * 3);
+        geometry.index.addUpdateRange(i0, inCount);
+        position.needsUpdate = true;
+        colorAttr.needsUpdate = true;
+        geometry.index.needsUpdate = true;
+
+        this.vertexCount += vn;
+        this.indexCount += inCount;
+        geometry.setDrawRange(0, this.indexCount);
+    }
+
+    /** Removes the last stroke appended. */
+    pop() {
+        const range = this.ranges.pop();
+        if (!range) return;
+        this.vertexCount = range.vertex;
+        this.indexCount = range.index;
+        this.mesh.geometry.setDrawRange(0, this.indexCount);
+    }
+
+    clear() {
+        this.ranges.length = 0;
+        this.vertexCount = 0;
+        this.indexCount = 0;
+        this.mesh.geometry.setDrawRange(0, 0);
+    }
+
+    // Grows the buffers (doubling) to hold this many vertices and indices. A
+    // new geometry each time, since a GL buffer can't be resized in place and
+    // disposing the old geometry is what frees its buffers.
+    _reserve(vertices, indices) {
+        if (vertices <= this._positions.length / 3 && indices <= this._indices.length) return;
+
+        const vCap = Math.max(vertices, this._positions.length / 3 * 2);
+        const iCap = Math.max(indices, this._indices.length * 2);
+        const positions = new Float32Array(vCap * 3);
+        const colors = new Float32Array(vCap * 3);
+        const index = new Uint32Array(iCap);
+        positions.set(this._positions.subarray(0, this.vertexCount * 3));
+        colors.set(this._colors.subarray(0, this.vertexCount * 3));
+        index.set(this._indices.subarray(0, this.indexCount));
+        this._positions = positions;
+        this._colors = colors;
+        this._indices = index;
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
+        geometry.setIndex(new THREE.BufferAttribute(index, 1).setUsage(THREE.DynamicDrawUsage));
+        geometry.setDrawRange(0, this.indexCount);
+        this.mesh.geometry.dispose();
+        this.mesh.geometry = geometry;
+    }
+}
+
 export class Frame extends THREE.Group {
     /**
      * @param {THREE.Object3D} worldOrigin - The world origin node this frame is parented to
@@ -455,20 +732,13 @@ export class Frame extends THREE.Group {
 
         // Per-controller active stroke state (keyed by controller ID)
         this._activeStrokes = new Map();  // controllerId -> Stroke
-        this._tempPoints = new Map();     // controllerId -> Vector3[]
-        this._rawPoints = new Map();      // controllerId -> Vector3[]
 
-        // Fill meshes for closed strokes (white to match line)
-        this._fillMaterial = new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            side: THREE.DoubleSide
-        });
-        // One mesh per completed stroke, index-aligned with `strokes` (null
-        // where a stroke was too short to produce geometry). Built once each
-        // and kept -- see _refreshGeometry().
-        this._fillMeshes = [];
+        // Completed strokes, all in one mesh -- see StrokeBatch. It holds one
+        // entry per stroke, in step with `strokes` (see _refreshGeometry).
+        this._batch = new StrokeBatch(this);
         this._tempFillMeshes = new Map(); // controllerId -> temp fill mesh
-        // Shared materials, one per colour (see _materialFor).
+        this._dirty = new Set();          // controllerIds whose temp mesh is stale
+        // Shared materials for the strokes being drawn, one per colour (see _materialFor).
         this._materials = new Map();      // colour -> MeshBasicMaterial
 
         // Stroke counter for Z-offset to prevent z-fighting
@@ -493,18 +763,14 @@ export class Frame extends THREE.Group {
      * @param {THREE.Vector3} worldPosition - Starting world position
      * @param {number|string} controllerId - Controller identifier
      * @param {number} [color] - Stroke color (optional)
+     * @param {number} [time] - When the point was measured, ms (see endStroke)
      * @returns {Stroke} The new stroke
      */
-    beginStroke(worldPosition, controllerId, color) {
+    beginStroke(worldPosition, controllerId, color, time) {
         const stroke = new Stroke(color ?? this.defaultColor);
         this._activeStrokes.set(controllerId, stroke);
-        this._tempPoints.set(controllerId, []);
-        this._rawPoints.set(controllerId, []);
-
-        // Convert world position to local and buffer it (trimming applied later)
-        const localPoint = this.worldToLocal(worldPosition.clone());
-        this._rawPoints.get(controllerId).push(localPoint);
-
+        stroke.addPoint(this.worldToLocal(worldPosition.clone()), time);
+        this._dirty.add(controllerId);
         return stroke;
     }
 
@@ -512,38 +778,31 @@ export class Frame extends THREE.Group {
      * Continues the active stroke with a new point for a specific controller
      * @param {THREE.Vector3} worldPosition - World position to add
      * @param {number|string} controllerId - Controller identifier
+     * @param {number} [time] - When the point was measured, ms (see endStroke)
      */
-    continueStroke(worldPosition, controllerId) {
+    continueStroke(worldPosition, controllerId, time) {
         const activeStroke = this._activeStrokes.get(controllerId);
         if (!activeStroke) return;
-
-        const rawPoints = this._rawPoints.get(controllerId);
-        const tempPoints = this._tempPoints.get(controllerId);
-
-        const localPoint = this.worldToLocal(worldPosition.clone());
-        rawPoints.push(localPoint);
-
-        // Add point that is pointsTrimEnd behind current, skipping first pointsTrimStart
-        // This trims pointsTrimStart from start and pointsTrimEnd from end (end points stay in buffer)
-        const addIndex = rawPoints.length - 1 - pointsTrimEnd;
-        if (addIndex >= pointsTrimStart) {
-            const pointToAdd = rawPoints[addIndex];
-            activeStroke.addPoint(pointToAdd);
-            tempPoints.push(pointToAdd);
-            this._refreshGeometry();
+        if (activeStroke.addPoint(this.worldToLocal(worldPosition.clone()), time)) {
+            this._dirty.add(controllerId);
         }
     }
 
     /**
      * Ends the current stroke for a specific controller
      * @param {number|string} controllerId - Controller identifier
+     * @param {number} [cutTime] - Drop the points measured after this (ms): the
+     *   part of the stroke drawn while the hand was changing to the sign that
+     *   ended it. Left out, every point is kept.
      */
-    endStroke(controllerId) {
+    endStroke(controllerId, cutTime) {
         const activeStroke = this._activeStrokes.get(controllerId);
 
-        // Last pointsTrimEnd points remain in _rawPoints buffer and are discarded
+        if (activeStroke && cutTime !== undefined) activeStroke.trimAfter(cutTime);
+        if (activeStroke) activeStroke.keepDot();
+
         if (activeStroke && activeStroke.points.length > 1) {
-            // Refine the stroke (split + smooth) before finalizing
+            // Refine the stroke (curve fit + smooth) before finalizing
             activeStroke.refine();
 
             // Offset along normal to prevent z-fighting with other strokes
@@ -554,8 +813,7 @@ export class Frame extends THREE.Group {
         }
 
         this._activeStrokes.delete(controllerId);
-        this._tempPoints.delete(controllerId);
-        this._rawPoints.delete(controllerId);
+        this._dirty.delete(controllerId);
 
         // Clean up temp fill mesh
         const tempFill = this._tempFillMeshes.get(controllerId);
@@ -570,64 +828,37 @@ export class Frame extends THREE.Group {
     }
 
     /**
-     * Brings the meshes in line with `strokes`, and rebuilds the active
-     * strokes' temporary geometry.
+     * Rebuilds the meshes of the strokes being drawn, if they have changed.
+     * Call once a frame, before rendering: a stroke can gain several points
+     * between frames, and it used to be rebuilt after each of them.
+     */
+    flush() {
+        if (!this._dirty.size) return;
+        for (const controllerId of this._dirty) this._updateTempFill(controllerId);
+        this._dirty.clear();
+    }
+
+    /**
+     * Brings the batch in line with `strokes`.
      *
      * A completed stroke never changes again -- endStroke() refines it and
-     * fixes its z-offset before pushing it -- so its mesh is built once and
-     * kept. `_fillMeshes` is index-aligned with `strokes` (null where a stroke
-     * was too short to produce geometry), which makes the two ways `strokes`
-     * moves cheap to follow: endStroke() appends, undo() pops.
+     * fixes its z-offset before pushing it -- so it goes into the batch once
+     * and stays. The two ways `strokes` moves are cheap to follow: endStroke()
+     * appends, undo() pops.
      *
      * This used to dispose and rebuild every stroke's geometry on every call,
-     * and continueStroke() calls it once per point -- so a drawing of N
-     * strokes cost O(N^2) triangulations, and by a few hundred strokes a
-     * single added point was rebuilding hundreds of meshes in one frame.
-     * Attract mode replays files of 600-1900 polygons, so it met that wall
-     * every time it ran.
+     * and continueStroke() called it once per point -- so a drawing of N
+     * strokes cost O(N^2) triangulations. Attract mode replays files of
+     * 600-1900 polygons, so it met that wall every time it ran.
      * @private
      */
     _refreshGeometry() {
-        // Strokes that have gone (undo, or a pop before a rebuild).
-        for (let i = this.strokes.length; i < this._fillMeshes.length; i++) {
-            const mesh = this._fillMeshes[i];
-            if (!mesh) continue;
-            this.remove(mesh);
-            mesh.geometry.dispose();
-        }
-        this._fillMeshes.length = this.strokes.length;
-
-        // Strokes that are new since the last call.
-        for (let i = 0; i < this.strokes.length; i++) {
-            if (this._fillMeshes[i] !== undefined) continue;
-
+        const batch = this._batch;
+        while (batch.count > this.strokes.length) batch.pop();
+        for (let i = batch.count; i < this.strokes.length; i++) {
             const stroke = this.strokes[i];
-            const geo = stroke.closed ? stroke.toFillGeometry() : stroke.toBrushGeometry();
-            if (!geo) {
-                this._fillMeshes[i] = null;   // keeps the indices aligned
-                continue;
-            }
-
-            const mesh = new THREE.Mesh(geo, this._materialFor(stroke.color));
-            mesh.frustumCulled = false;
-            mesh.position.copy(stroke.previewOffset());
-            this.add(mesh);
-            this._fillMeshes[i] = mesh;
-        }
-
-        // Add temp brush geometry from all active strokes
-        for (const [controllerId, tempPoints] of this._tempPoints.entries()) {
-            // Update temp brush mesh for this controller
-            this._updateTempFill(controllerId, tempPoints);
-        }
-
-        // Remove temp fills for controllers no longer drawing
-        for (const [controllerId, mesh] of this._tempFillMeshes.entries()) {
-            if (!this._tempPoints.has(controllerId)) {
-                this.remove(mesh);
-                mesh.geometry.dispose();
-                this._tempFillMeshes.delete(controllerId);
-            }
+            const arrays = stroke.closed ? stroke.fillArrays() : stroke.brushArrays();
+            batch.append(arrays, stroke.color, stroke.previewOffset());
         }
     }
 
@@ -647,11 +878,11 @@ export class Frame extends THREE.Group {
     }
 
     /**
-     * Updates or creates a temp fill mesh for active drawing
+     * Rebuilds the temp mesh for a stroke being drawn: the same curve refine()
+     * will give it, so what is drawn is what stays.
      * @private
      */
-    _updateTempFill(controllerId, tempPoints) {
-        // Remove existing temp fill
+    _updateTempFill(controllerId) {
         const existing = this._tempFillMeshes.get(controllerId);
         if (existing) {
             this.remove(existing);
@@ -659,24 +890,17 @@ export class Frame extends THREE.Group {
             this._tempFillMeshes.delete(controllerId);
         }
 
-        if (tempPoints.length < 2) {
-            return;
-        }
-
-        // Create a temporary stroke from temp points to generate geometry
         const activeStroke = this._activeStrokes.get(controllerId);
-        const tempStroke = new Stroke(activeStroke ? activeStroke.color : 0xffffff);
-        tempStroke.points = tempPoints.map(p => p.clone());
-        tempStroke.closed = activeStroke ? activeStroke.closed : false;
-        tempStroke.computePressures();
+        if (!activeStroke || activeStroke.points.length < 2) return;
 
-        const geometry = tempStroke.closed
-            ? tempStroke.toFillGeometry()
-            : tempStroke.toBrushGeometry();
+        const preview = new Stroke(activeStroke.color);
+        preview.closed = activeStroke.closed;
+        preview.points = catmullRom(activeStroke.points, CURVE_SPACING, CURVE_MAX_STEPS);
+
+        const geometry = preview.closed ? preview.toFillGeometry() : preview.toBrushGeometry();
         if (!geometry) return;
 
-        const fillColor = activeStroke ? activeStroke.color : 0xffffff;
-        const mesh = new THREE.Mesh(geometry, this._materialFor(fillColor));
+        const mesh = new THREE.Mesh(geometry, this._materialFor(activeStroke.color));
         mesh.frustumCulled = false;
         this.add(mesh);
         this._tempFillMeshes.set(controllerId, mesh);
@@ -744,16 +968,8 @@ export class Frame extends THREE.Group {
     clear() {
         this.strokes = [];
         this._activeStrokes.clear();
-        this._tempPoints.clear();
-        this._rawPoints.clear();
-
-        // Clear fill meshes
-        for (const mesh of this._fillMeshes) {
-            if (!mesh) continue;
-            this.remove(mesh);
-            mesh.geometry.dispose();
-        }
-        this._fillMeshes = [];
+        this._dirty.clear();
+        this._batch.clear();
 
         for (const mesh of this._tempFillMeshes.values()) {
             this.remove(mesh);
@@ -790,10 +1006,11 @@ export class Frame extends THREE.Group {
             if (elapsed < FLICKER_DURATION) {
                 const vis = Math.floor(elapsed / FLICKER_INTERVAL) % 2 === 0;
                 this.lineMesh.visible = vis;
-                for (const mesh of this._fillMeshes) if (mesh) mesh.visible = vis;
+                this._batch.mesh.visible = vis;
                 requestAnimationFrame(flicker);
             } else {
                 this.lineMesh.visible = true;
+                this._batch.mesh.visible = true;
                 this.clear();
                 if (onComplete) onComplete();
             }

@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 
+const _forward = new THREE.Vector3();
+const _planeCenter = new THREE.Vector3();
+const _normal = new THREE.Vector3();
+const _intersection = new THREE.Vector3();
+
 /**
  * MouseController - Projects mouse into 3D space for drawing
  * Left click to draw, right click to toggle palette
@@ -144,17 +149,17 @@ export class MouseController extends THREE.Object3D {
      * @param {THREE.Camera} camera - The scene camera
      */
     update(camera) {
-        // Update draw plane to be at fixed distance from camera, facing camera
-        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-        const planeCenter = camera.position.clone().addScaledVector(forward, this._drawDistance);
-        this._drawPlane.setFromNormalAndCoplanarPoint(forward.clone().negate(), planeCenter);
+        // Update draw plane to be at fixed distance from camera, facing camera.
+        // (Scratch vectors: this runs every frame, and garbage is pauses.)
+        const forward = _forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+        const planeCenter = _planeCenter.copy(camera.position).addScaledVector(forward, this._drawDistance);
+        this._drawPlane.setFromNormalAndCoplanarPoint(_normal.copy(forward).negate(), planeCenter);
 
         // Project mouse ray onto draw plane
         this._raycaster.setFromCamera(this._mouseNDC, camera);
 
-        const intersection = new THREE.Vector3();
-        if (this._raycaster.ray.intersectPlane(this._drawPlane, intersection)) {
-            this.position.copy(intersection);
+        if (this._raycaster.ray.intersectPlane(this._drawPlane, _intersection)) {
+            this.position.copy(_intersection);
         }
 
         // Make rim face camera
