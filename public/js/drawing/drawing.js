@@ -1746,7 +1746,7 @@ function convertToNAPLPS() {
 
 // ── Mint gesture (double thumbs-up) ──
 // Drawing mode stays up: the strokes are encoded as they stand and handed to
-// the wallet shim in js/tezos/tezos.js, which owns signing. The Beacon popup
+// the wallet shim in js/libraries/tezos/tezos.js, which owns signing. The Beacon popup
 // renders outside #drawing-container, so the system cursor (hidden inside it,
 // see main.css) comes back for the wallet prompt.
 let mintInFlight = false;

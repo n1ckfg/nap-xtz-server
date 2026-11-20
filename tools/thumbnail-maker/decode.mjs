@@ -1,5 +1,5 @@
 /*
-Runs public/js/telidon/naplps.js — the same decoder the browser uses, unmodified
+Runs public/js/libraries/telidon/naplps.js — the same decoder the browser uses, unmodified
 — inside a vm context so the CLI and the web client can never drift apart.
 
 Two details make this work:
@@ -17,7 +17,7 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export const NAPLPS_JS = path.resolve(here, "../../public/js/telidon/naplps.js");
+export const NAPLPS_JS = path.resolve(here, "../../public/js/libraries/telidon/naplps.js");
 
 const script = new vm.Script(fs.readFileSync(NAPLPS_JS, "utf8"), { filename: NAPLPS_JS });
 

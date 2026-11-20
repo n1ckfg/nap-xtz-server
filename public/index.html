@@ -34,13 +34,13 @@
 		<script type="text/javascript" src="./js/libraries/p5js/p5.dom.min.js"></script>
 		<script type="text/javascript" src="./js/libraries/p5js/p5.svg.js"></script>
 		<!--<script type="text/javascript" src="./js/libraries/gifjs/gif.js"></script>-->
-		<script type="text/javascript" src="./js/telidon/naplps.js"></script>
-		<script type="text/javascript" src="./js/telidon/TelidonP5.js"></script>
-		<!-- The Beacon wallet SDK loads on demand: see ensureBeacon() in js/tezos/tezos.js. -->
+		<script type="text/javascript" src="./js/libraries/telidon/naplps.js"></script>
+		<script type="text/javascript" src="./js/libraries/telidon/TelidonP5.js"></script>
+		<!-- The Beacon wallet SDK loads on demand: see ensureBeacon() in js/libraries/tezos/tezos.js. -->
 		<!-- Backend link: chain reads and NAPLPS messages come from app.js, not from this page. -->
 		<script type="text/javascript" src="/socket.io/socket.io.js"></script>
 		<script type="text/javascript" src="./js/net/client.js"></script>
-		<script type="text/javascript" src="./js/tezos/tezos.js"></script>
+		<script type="text/javascript" src="./js/libraries/tezos/tezos.js"></script>
 		<!-- One simplification tolerance for the whole page. It lives in
 		     js/drawing/tools.js because that is where the brush geometry it was
 		     chosen for lives, and the harness in tools/brush-geometry imports it
@@ -384,7 +384,7 @@
 			function showSlide(slide) {
 			    if (!slideshowActive || liveDrawingActive) return;
 			    drawNap(slide.naplps);
-			    noteSlide(slide); // js/tezos/tezos.js: the status line, and the arrow keys' place
+			    noteSlide(slide); // js/libraries/tezos/tezos.js: the status line, and the arrow keys' place
 			}
 
 			//function setPreview(name) {
@@ -696,7 +696,7 @@
 		});
 
 		// A step back or forward along the chain: earlier mints to the left, later
-		// ones to the right (js/tezos/tezos.js holds the position). Review mode
+		// ones to the right (js/libraries/tezos/tezos.js holds the position). Review mode
 		// only, whether it came from a key or from "<<" / ">>" -- in drawing mode
 		// the canvas this would load onto is behind the overlay, and the keyboard
 		// belongs to the drawing.

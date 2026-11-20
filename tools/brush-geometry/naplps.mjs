@@ -1,5 +1,5 @@
 /*
-The measuring end of the harness: runs public/js/telidon/naplps.js — the
+The measuring end of the harness: runs public/js/libraries/telidon/naplps.js — the
 browser's own encoder AND decoder, unmodified — in a vm context, so a candidate
 geometry is scored against the code that will actually carry it.
 
@@ -20,7 +20,7 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export const NAPLPS_JS = path.resolve(here, "../../public/js/telidon/naplps.js");
+export const NAPLPS_JS = path.resolve(here, "../../public/js/libraries/telidon/naplps.js");
 
 // Both forms of the quantisation live in naplps.js, one of them commented out;
 // which one is live has changed over the file's history, so match on the live

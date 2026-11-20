@@ -20,7 +20,7 @@
       --init '(Pair (Pair {} {}) (Pair {} 0))' \
       --burn-cap 2
 
-  Copy the KT1... address into CONTRACT_ADDRESS in js/tezos/tezos.js.
+  Copy the KT1... address into CONTRACT_ADDRESS in js/libraries/tezos/tezos.js.
 *)
 
 (* ── Types ─────────────────────────────────────────────────────────────────── *)

@@ -24,7 +24,7 @@ Directories are read one level deep for `*.nap`; shell globs work too.
 
 ## How it renders
 
-`decode.mjs` runs `public/js/telidon/naplps.js` — the decoder the web client
+`decode.mjs` runs `public/js/libraries/telidon/naplps.js` — the decoder the web client
 uses, unmodified — in a `vm` context, supplying the two p5 globals it reaches
 for (`pow`, `int`) and the `window` it exports its classes onto. Nothing is
 duplicated here, so a fix to the decoder reaches this tool for free.

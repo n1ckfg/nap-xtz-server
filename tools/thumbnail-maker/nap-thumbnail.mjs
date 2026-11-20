@@ -2,7 +2,7 @@
 /*
 nap-thumbnail — renders NAPLPS .nap files to PNG screenshots.
 
-Each input file is decoded with public/js/telidon/naplps.js (the browser's own
+Each input file is decoded with public/js/libraries/telidon/naplps.js (the browser's own
 decoder) and drawn the way public/index.html draws it, then written next to the
 source with the same basename:
 

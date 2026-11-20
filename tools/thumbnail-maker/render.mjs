@@ -1,6 +1,6 @@
 /*
 Draws decoded NAPLPS commands to a Canvas — the command switch of
-public/js/telidon/TelidonP5.js, ported off p5.js.
+public/js/libraries/telidon/TelidonP5.js, ported off p5.js.
 
 The geometry follows public/index.html: the artwork is a 640-unit square, drawn
 into a 640x480 screen shifted up by (sH - sW) so the visible band is the NAPLPS

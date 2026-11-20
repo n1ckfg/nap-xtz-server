@@ -38,7 +38,7 @@ written by `tools/thumbnail-maker`.
 ## What it measures against
 
 Nothing here re-implements the format. `naplps.mjs` runs
-`public/js/telidon/naplps.js` — the browser's own encoder *and* decoder — in a
+`public/js/libraries/telidon/naplps.js` — the browser's own encoder *and* decoder — in a
 `vm` context, so a candidate is scored against the code that will actually carry
 it, and a fix to either reaches this tool for free.
 

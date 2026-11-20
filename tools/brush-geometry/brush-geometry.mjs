@@ -9,7 +9,7 @@ brush-geometry — measures how a drawing-mode brush stroke survives NAPLPS.
     node tools/brush-geometry/brush-geometry.mjs draw
     node tools/brush-geometry/brush-geometry.mjs loss
 
-Every stroke is encoded and decoded by public/js/telidon/naplps.js itself, so
+Every stroke is encoded and decoded by public/js/libraries/telidon/naplps.js itself, so
 what the table reports is what the browser and the Pi will get.
 */
 import fs from "node:fs";
