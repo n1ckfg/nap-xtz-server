@@ -1535,13 +1535,15 @@ function convertToNAPLPS() {
         return null;
     }
 
-    // NapInputWrapper, NapEncoder, Vector2, Vector3 are global (from naplps.js)
-    if (typeof window.NapInputWrapper === 'undefined' || typeof window.NapEncoder === 'undefined') {
-        console.error('NapInputWrapper or NapEncoder not available');
+    // NAPLPS is global (from naplps.js)
+    if (typeof window.NAPLPS === 'undefined' || typeof window.NAPLPS.encode !== 'function') {
+        console.error('NAPLPS encoder not available');
         return null;
     }
 
     frame.updateWorldMatrix(true, false); // the loop may already be stopped
+
+    const vScale = 1 / DRAW_ASPECT; // 0.75
 
     // Strokes are kept in the frame's own space, and the frame rides on the node
     // the two-handed gesture moves, so a point has to go through that transform
@@ -1551,15 +1553,9 @@ function convertToNAPLPS() {
         const projected = frame.localToWorld(point.clone()).project(camera);
 
         // NDC: x=-1 is left, x=1 is right; y=-1 is bottom, y=1 is top
-        // NAPLPS: x=0 is left, x=1 is right; y=0 is top, y=1 is bottom
+        // NAPLPS unit screen: x in [0, 1] left-to-right, y in [0, 0.75] bottom-to-top
         const nx = (projected.x + 1) / 2;
-
-        // The main canvas renders NAPLPS into a SQUARE 640x640 space, so the
-        // 4:3 view's vertical extent must be compressed by 480/640 (= 1/DRAW_ASPECT)
-        // and pushed down by the remainder, matching the SVG-import convention
-        // (y/sH*0.75 + 0.25). Without this the drawing looks horizontally squeezed.
-        const vScale = 1 / DRAW_ASPECT; // 0.75
-        const ny = ((1 - projected.y) / 2) * vScale + (1 - vScale); // Flip Y, fit 4:3
+        const ny = ((projected.y + 1) / 2) * vScale;
 
         return { x: nx, y: ny };
     };
@@ -1573,12 +1569,20 @@ function convertToNAPLPS() {
         .applyMatrix3(toStrokeSpace)
         .normalize();
 
-    // Every stroke's polygons at one simplification tolerance.
-    // Fresh Vector2s each time: NapEncoder flips a point's y in
-    // place as it encodes, so a second pass over the same objects would come out
-    // upside down.
+    const encodeCommands = (commands) => {
+        const bytes = window.NAPLPS.encode(commands);
+        let out = '';
+        for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+        return out;
+    };
+
+    // Every stroke's polygons as a NAPLPS command array at one simplification tolerance.
     const buildInput = (epsilon) => {
-        const input = [];
+        const commands = [
+            { type: 'domain', multiBytes: 4, singleBytes: 1 },
+            { type: 'reset', screen: true, r: 0, g: 0, b: 0 }
+        ];
+        let polyCount = 0;
 
         const simplifyIndices = (pts, eps, start, end) => {
                 if (end - start < 2) return [start, end];
@@ -1604,22 +1608,23 @@ function convertToNAPLPS() {
             if (!stroke.points || stroke.points.length < 2) continue;
 
             const hex = stroke.color || 0xffffff;
-            const r = (hex >> 16) & 0xff;
-            const g = (hex >> 8) & 0xff;
-            const b = hex & 0xff;
-            const color = new window.Vector3(r, g, b);
+            const r = ((hex >> 16) & 0xff) / 255;
+            const g = ((hex >> 8) & 0xff) / 255;
+            const b = (hex & 0xff) / 255;
 
             // Closed strokes: the polyline IS the polygon — no brush expansion.
             if (stroke.closed) {
                 const verts = stroke.toScreenPolygon(project);
                 if (verts.length < 3) continue;
                 const keep = simplifyIndices(verts, epsilon, 0, verts.length - 1);
-                const poly = keep.map(idx => new window.Vector2(
-                    Math.max(0, Math.min(1, verts[idx].x)),
-                    Math.max(0, Math.min(1, verts[idx].y))
-                ));
+                const poly = keep.map(idx => ({
+                    x: Math.max(0, Math.min(1, verts[idx].x)),
+                    y: Math.max(0, Math.min(vScale, verts[idx].y))
+                }));
                 if (poly.length < 3) continue;
-                input.push(new window.NapInputWrapper(color, poly, true));
+                commands.push({ type: 'setColor', r, g, b });
+                commands.push({ type: 'polygon', filled: true, points: poly });
+                polyCount++;
                 continue;
             }
 
@@ -1664,20 +1669,22 @@ function convertToNAPLPS() {
                 const pX = -tY;
                 const pY = tX;
 
-                leftEdge.push(new window.Vector2(
-                    Math.max(0, Math.min(1, p.x + pX * rad)),
-                    Math.max(0, Math.min(1, p.y + pY * rad))
-                ));
-                rightEdge.unshift(new window.Vector2(
-                    Math.max(0, Math.min(1, p.x - pX * rad)),
-                    Math.max(0, Math.min(1, p.y - pY * rad))
-                ));
+                leftEdge.push({
+                    x: Math.max(0, Math.min(1, p.x + pX * rad)),
+                    y: Math.max(0, Math.min(vScale, p.y + pY * rad))
+                });
+                rightEdge.unshift({
+                    x: Math.max(0, Math.min(1, p.x - pX * rad)),
+                    y: Math.max(0, Math.min(vScale, p.y - pY * rad))
+                });
             }
 
             const points2D = [...leftEdge, ...rightEdge];
-            input.push(new window.NapInputWrapper(color, points2D, true));
+            commands.push({ type: 'setColor', r, g, b });
+            commands.push({ type: 'polygon', filled: true, points: points2D });
+            polyCount++;
         }
-        return input;
+        return { commands, polyCount };
     };
     // enough to fit; whatever room is left then buys the cover runs back.
     //
@@ -1695,53 +1702,53 @@ function convertToNAPLPS() {
     const limit = maxNaplpsBytes;
 
     let epsilon = BRUSH_SIMPLIFY;
-    let input = buildInput(epsilon);
+    let built = buildInput(epsilon);
 
-    if (input.length === 0) {
+    if (built.polyCount === 0) {
         console.log('No valid strokes to encode');
         return null;
     }
 
-    let encoder = new window.NapEncoder(input);
+    let napRaw = encodeCommands(built.commands);
 
     // A drawing that won't fit the chain is redrawn with a coarser brush rather
     // than handed over to be refused: the shape survives losing points far
     // better than the drawing survives a mint that never happens.
-    for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && limit !== null && encoder.napRaw.length > limit; pass++) {
+    for (let pass = 1; pass < MAX_SIMPLIFY_PASSES && limit !== null && napRaw.length > limit; pass++) {
         // Doubling alone can't leave zero, and zero is a brush tuned to keep
         // every point it was given. Step onto the encoder's own quantum first:
         // the coarsest tolerance that still discards nothing the format could
         // have carried anyway.
         epsilon = Math.max(epsilon * 2, MIN_STEP);
-        console.log(`[nap-xtz] ${encoder.napRaw.length} bytes is over the ${limit} limit; ` +
+        console.log(`[nap-xtz] ${napRaw.length} bytes is over the ${limit} limit; ` +
                     `simplifying at ${epsilon.toFixed(4)}`);
 
         const simpler = buildInput(epsilon);
-        if (simpler.length === 0) break; // nothing left to give: keep what we have
+        if (simpler.polyCount === 0) break; // nothing left to give: keep what we have
 
-        input = simpler;
-        encoder = new window.NapEncoder(input);
+        built = simpler;
+        napRaw = encodeCommands(built.commands);
     }
 
     if (limit === null) {
         console.warn('[nap-xtz] no size limit from the backend yet -- encoded without fitting it');
-    } else if (encoder.napRaw.length > limit) {
+    } else if (napRaw.length > limit) {
         // Encoded anyway: the canvas and the Raspberry Pi will take it even
         // though a mint won't, and the wallet says so in its own words.
-        console.warn(`[nap-xtz] drawing is ${encoder.napRaw.length} bytes, still over the ` +
+        console.warn(`[nap-xtz] drawing is ${napRaw.length} bytes, still over the ` +
                      `${limit} limit -- too much to mint`);
     }
 
     // Load into the main canvas
     if (typeof window.loadTelidonFromText === 'function') {
-        window.loadTelidonFromText(encoder.napRaw);
+        window.loadTelidonFromText(napRaw);
     } else {
         console.error('loadTelidonFromText not available');
     }
 
-    console.log(`Converted ${frame.strokes.length} strokes (${input.length} polygons) ` +
-                `to ${encoder.napRaw.length} bytes of NAPLPS at tolerance ${epsilon.toFixed(4)}`);
-    return encoder.napRaw;
+    console.log(`Converted ${frame.strokes.length} strokes (${built.polyCount} polygons) ` +
+                `to ${napRaw.length} bytes of NAPLPS at tolerance ${epsilon.toFixed(4)}`);
+    return napRaw;
 }
 
 // ── Mint gesture (double thumbs-up) ──

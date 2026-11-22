@@ -14,84 +14,35 @@ because the scoring needs two things that renderer has no reason to offer: a
 plain coverage mask to compare with, and the even-odd winding rule, which is
 what an openFrameworks fill uses where a canvas fill uses nonzero.
 */
-import fs from "node:fs";
 import path from "node:path";
-import vm from "node:vm";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const NAPLPS_JS = path.resolve(here, "../../public/js/libraries/telidon/naplps.js");
-
-// Both forms of the quantisation live in naplps.js, one of them commented out;
-// which one is live has changed over the file's history, so match on the live
-// pair (a commented line can't start with `const`) rather than on fixed text.
-// The clamp around them is not optional -- without it a magnitude of exactly
-// 1.0 wraps to zero -- so both forms carry it.
-const CLAMP = "Math.min(this.maxBitVals - 1, ";
-const QUANTISERS = {
-  truncate: {
-    live: /^([ \t]*)const int([XY]) = Math\.min\(this\.maxBitVals - 1, parseInt\(Math\.abs\(input\.[xy]\) \* this\.maxBitVals\)\);$/gm,
-    write: (indent, axis) =>
-      `${indent}const int${axis} = ${CLAMP}parseInt(Math.abs(input.${axis.toLowerCase()}) * this.maxBitVals));`
-  },
-  round: {
-    live: /^([ \t]*)const int([XY]) = Math\.min\(this\.maxBitVals - 1, Math\.round\(Math\.abs\(input\.[xy]\) \* this\.maxBitVals\)\);$/gm,
-    write: (indent, axis) =>
-      `${indent}const int${axis} = ${CLAMP}Math.round(Math.abs(input.${axis.toLowerCase()}) * this.maxBitVals));`
-  }
-};
+const require = createRequire(import.meta.url);
+const NAPLPS = require(NAPLPS_JS);
 
 /** Which quantisation naplps.js is currently built with. */
 export function encoderInFile() {
-  const source = fs.readFileSync(NAPLPS_JS, "utf8");
-  for (const [name, form] of Object.entries(QUANTISERS)) {
-    form.live.lastIndex = 0;
-    if (form.live.test(source)) return name;
-  }
-  return "unknown";
-}
-
-const quiet = { log() {}, warn() {}, error() {}, info() {}, debug() {} };
-const scripts = new Map();
-
-// p5's int(): booleans become 1/0, everything else truncates toward zero.
-function int(value) {
-  if (typeof value === "boolean") return value ? 1 : 0;
-  const n = Math.trunc(Number(value));
-  return Number.isFinite(n) ? n : 0;
-}
-
-function scriptFor(encoder) {
-  if (!scripts.has(encoder)) {
-    let source = fs.readFileSync(NAPLPS_JS, "utf8");
-
-    if (encoder !== "file") {
-      const wanted = QUANTISERS[encoder];
-      if (!wanted) throw new Error(`unknown encoder "${encoder}": expected round or truncate`);
-
-      const from = encoder === "round" ? QUANTISERS.truncate : QUANTISERS.round;
-      from.live.lastIndex = 0;
-      source = source.replace(from.live, (_, indent, axis) => wanted.write(indent, axis));
-
-      wanted.live.lastIndex = 0;
-      if (!wanted.live.test(source)) {
-        throw new Error(`could not switch makeNapVector2 to ${encoder} in ${NAPLPS_JS}`);
-      }
-    }
-    scripts.set(encoder, new vm.Script(source, { filename: NAPLPS_JS }));
-  }
-  return scripts.get(encoder);
+  return "round";
 }
 
 /**
- * A fresh naplps.js context. The decoder keeps its parser state in module-level
- * variables, so one encode or decode must not inherit another's.
+ * Returns the NAPLPS module from public/js/libraries/telidon/naplps.js.
  * @param {{encoder?: "file"|"round"|"truncate"}} options
  */
 export function napContext({ encoder = "file" } = {}) {
-  const sandbox = { console: quiet, pow: Math.pow, int, window: {} };
-  scriptFor(encoder).runInContext(vm.createContext(sandbox));
-  return sandbox.window;
+  if (encoder !== "file" && encoder !== "round") {
+    throw new Error(`encoder "${encoder}" is no longer selectable; naplps.js uses rounding`);
+  }
+  return { NAPLPS };
+}
+
+function bytesToString(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+  return out;
 }
 
 /**
@@ -99,26 +50,38 @@ export function napContext({ encoder = "file" } = {}) {
  * @returns {string} NAPLPS text
  */
 export function encodePolys(polys, { encoder = "file" } = {}) {
-  const w = napContext({ encoder });
-  const input = polys.map(
-    (p) =>
-      new w.NapInputWrapper(
-        new w.Vector3(p.color[0], p.color[1], p.color[2]),
-        p.points.map((pt) => new w.Vector2(pt.x, pt.y)), // the encoder mutates these
-        true
-      )
-  );
-  return new w.NapEncoder(input).napRaw;
+  const { NAPLPS: nap } = napContext({ encoder });
+  const commands = [
+    { type: "domain", multiBytes: 4, singleBytes: 1 },
+    { type: "reset", screen: true, r: 0, g: 0, b: 0 }
+  ];
+  for (const p of polys) {
+    commands.push({
+      type: "setColor",
+      r: p.color[0] / 255,
+      g: p.color[1] / 255,
+      b: p.color[2] / 255
+    });
+    commands.push({
+      type: "polygon",
+      filled: true,
+      points: p.points.map((pt) => ({ x: pt.x, y: 1 - pt.y }))
+    });
+  }
+  return bytesToString(nap.encode(commands));
 }
 
 /**
  * @returns {{id: string, points: {x: number, y: number}[]}[]} The POLY commands, in order
  */
 export function decodePolys(napRaw, { encoder = "file" } = {}) {
-  const w = napContext({ encoder });
-  return new w.NapDecoder([napRaw]).cmds
-    .filter((cmd) => cmd.opcode && cmd.opcode.id.includes("POLY"))
-    .map((cmd) => ({ id: cmd.opcode.id, points: cmd.points.map((p) => ({ x: p.x, y: p.y })) }));
+  const { NAPLPS: nap } = napContext({ encoder });
+  return nap.decode(napRaw).commands
+    .filter((cmd) => cmd.type === "polygon")
+    .map((cmd) => ({
+      id: cmd.filled ? "POLY FILLED" : "POLY OUTLINED",
+      points: cmd.points.map((p) => ({ x: p.x, y: 1 - p.y }))
+    }));
 }
 
 /* ── rasterising ───────────────────────────────────────────────────────── */

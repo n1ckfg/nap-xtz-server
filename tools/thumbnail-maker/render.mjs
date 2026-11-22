@@ -18,135 +18,127 @@ const ART = 640; // index.html builds TelidonDraw with (sW, sW)
 const SCREEN_W = 640; // index.html: sW
 const SCREEN_H = 480; // index.html: sH
 
-export function renderNap(napText, { width = SCREEN_W, verbose = false } = {}) {
-  const decoder = decodeNap(napText, { verbose });
+export function renderNap(napText, { width = SCREEN_W } = {}) {
+  const decoded = decodeNap(napText);
+  const commands = decoded.commands || [];
 
   const height = Math.round((width * SCREEN_H) / SCREEN_W);
   const scale = width / SCREEN_W;
-  const yShift = SCREEN_H - SCREEN_W; // p5: translate(0, sH - sW)
   const canvas = new Canvas(width, height);
 
-  canvas.clear([0, 0, 0]); // draw(): background(0)
-  if (decoder.version === 699) canvas.clear([127, 127, 127]); // TelidonDraw.draw()
+  canvas.clear([0, 0, 0]);
 
-  // p5 defaults, plus TelidonDrawCmd's thickness of 1 (in artwork units).
-  const gfx = {
-    fill: [255, 255, 255],
-    stroke: [0, 0, 0],
-    weight: 1 * scale,
-    ellipseMode: "CENTER", // only arcs read this back; TelidonP5 sets rectMode inline
+  const toRgb = (c) => [
+    Math.max(0, Math.min(255, Math.round(c.r * 255))),
+    Math.max(0, Math.min(255, Math.round(c.g * 255))),
+    Math.max(0, Math.min(255, Math.round(c.b * 255))),
+  ];
+
+  // Resolve final palette (like TelidonP5 displayPaletteFor)
+  let displayPalette = [];
+  for (const cmd of commands) {
+    if (cmd.type === "palette") {
+      displayPalette = cmd.colors.map((c) => ({ r: c.r, g: c.g, b: c.b }));
+    } else if (cmd.type === "setPalette") {
+      displayPalette[cmd.index] = { r: cmd.r, g: cmd.g, b: cmd.b };
+    }
+  }
+
+  let colorMode = 0;
+  let fgIndex = 0;
+  let direct = { r: 1, g: 1, b: 1 };
+  const weight = Math.max(1, 1 * scale);
+
+  const fgRgb = () => {
+    const c = colorMode === 0 ? direct : (displayPalette[fgIndex] || { r: 1, g: 1, b: 1 });
+    return toRgb(c);
   };
-  const stats = { version: decoder.version, commands: decoder.cmds.length, text: 0 };
 
-  const toDevice = (p) => [p.x * ART * scale, (p.y * ART + yShift) * scale];
-  const onScreen = (p) => p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1;
+  const stats = { version: decoded.format, commands: commands.length, text: 0 };
 
-  function setColor(v) {
-    gfx.fill = [v.x, v.y, v.z];
-    gfx.stroke = [v.x, v.y, v.z];
-  }
+  const toDevice = (p) => [p.x * width, height - p.y * width];
 
-  function paint(path) {
-    if (gfx.fill && path.length >= 3) canvas.fill([path], gfx.fill);
-    if (gfx.stroke && path.length >= 1) canvas.stroke(path, gfx.weight, gfx.stroke, { closed: true });
-  }
+  for (const cmd of commands) {
+    switch (cmd.type) {
+      case "reset":
+        if (cmd.screen) canvas.clear(toRgb(cmd));
+        break;
 
-  // beginShape() ... vertex() ... endShape(CLOSE)
-  function drawPoints(points, isFill) {
-    if (!isFill) gfx.fill = null;
-    paint(points.map(toDevice));
-  }
+      case "setColor":
+        if (!cmd.transparent) direct = { r: cmd.r, g: cmd.g, b: cmd.b };
+        break;
 
-  function drawRect(points, isFill) {
-    if (!isFill) gfx.fill = null;
-    if (points.length !== 2) {
-      drawPoints(points, undefined); // TelidonP5 falls back without the fill flag
-      return;
-    }
-    const [a, b] = points.map(toDevice); // p5: rectMode(CORNER), rect(x1, y1, x2 - x1, y2 - y1)
-    paint([[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]);
-  }
+      case "selectColor":
+        if (cmd.mode !== undefined) colorMode = cmd.mode;
+        if (cmd.index !== undefined) fgIndex = cmd.index;
+        break;
 
-  function drawArc(points, isFill) {
-    if (!isFill) gfx.fill = null;
-    if (points.length === 2) {
-      // p5: ellipse(x1, y1, x2 - x1, x2 - x1) — a circle, negative sizes abs'd.
-      gfx.ellipseMode = "CORNER";
-      const [a, b] = points.map(toDevice);
-      const d = Math.abs(b[0] - a[0]);
-      paint(ellipsePath(a[0] + d / 2, a[1] + d / 2, d / 2, d / 2));
-      return;
-    }
-    // p5: arc(x1, y1, x2 - x1, y2 - y1, ...) per pair, in the current ellipseMode.
-    for (let i = 0; i < points.length - 1; i++) {
-      const a = toDevice(points[i]);
-      const b = toDevice(points[i + 1]);
-      const w = b[0] - a[0];
-      const h = b[1] - a[1];
-      const cx = gfx.ellipseMode === "CORNER" ? a[0] + w / 2 : a[0];
-      const cy = gfx.ellipseMode === "CORNER" ? a[1] + h / 2 : a[1];
-      const start = (i * Math.PI) / points.length;
-      const stop = ((i + 1) * Math.PI) / points.length;
-      const path = arcPath(cx, cy, w / 2, h / 2, start, stop);
-      // Default arc mode: filled as a pie, stroked as an open curve.
-      if (gfx.fill && path.length >= 2) canvas.fill([[...path, [cx, cy]]], gfx.fill);
-      if (gfx.stroke) canvas.stroke(path, gfx.weight, gfx.stroke, { closed: false });
-    }
-  }
-
-  for (const cmd of decoder.cmds) {
-    // TelidonDrawCmd keeps only the points that land inside the unit square.
-    const points = cmd.points.filter(onScreen);
-
-    switch (cmd.opcode.id) {
-      case "Shift-In": // text mode
+      case "text":
         stats.text++;
         break;
 
-      case "POINT SET ABS":
-      case "POINT SET REL":
-      case "POINT ABS":
-      case "POINT REL":
-      case "LINE ABS":
-      case "LINE REL":
-      case "SET & LINE ABS":
-      case "SET & LINE REL":
-        drawPoints(points, undefined);
+      case "point":
+        if (cmd.draw) {
+          const [x, y] = toDevice(cmd);
+          canvas.stroke([[x, y], [x, y]], weight, fgRgb(), { closed: false });
+        }
         break;
 
-      case "POLY OUTLINED":
-      case "SET & POLY OUTLINED":
-        drawPoints(points, false);
+      case "line": {
+        const a = toDevice({ x: cmd.x1, y: cmd.y1 });
+        const b = toDevice({ x: cmd.x2, y: cmd.y2 });
+        canvas.stroke([a, b], weight, fgRgb(), { closed: false });
         break;
-      case "POLY FILLED":
-      case "SET & POLY FILLED":
-        drawPoints(points, true);
+      }
+
+      case "incLine":
+        for (const s of cmd.segments || []) {
+          const a = toDevice({ x: s.x1, y: s.y1 });
+          const b = toDevice({ x: s.x2, y: s.y2 });
+          canvas.stroke([a, b], weight, fgRgb(), { closed: false });
+        }
         break;
 
-      case "ARC OUTLINED":
-      case "SET & ARC OUTLINED":
-        drawArc(cmd.points, false);
+      case "rect": {
+        const x0 = Math.min(cmd.x, cmd.x + cmd.w) * width;
+        const x1 = Math.max(cmd.x, cmd.x + cmd.w) * width;
+        const y0 = height - Math.max(cmd.y, cmd.y + cmd.h) * width;
+        const y1 = height - Math.min(cmd.y, cmd.y + cmd.h) * width;
+        const path = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        const col = fgRgb();
+        if (cmd.filled) canvas.fill([path], col);
+        else canvas.stroke(path, weight, col, { closed: true });
         break;
-      case "ARC FILLED":
-      case "SET & ARC FILLED":
-        drawArc(cmd.points, true);
-        break;
+      }
 
-      case "RECT OUTLINED":
-      case "SET & RECT OUTLINED":
-        drawRect(cmd.points, false);
+      case "polygon": {
+        if (!cmd.points || cmd.points.length < 2) break;
+        const path = cmd.points.map(toDevice);
+        const col = fgRgb();
+        if (cmd.filled && path.length >= 3) canvas.fill([path], col);
+        else canvas.stroke(path, weight, col, { closed: true });
         break;
-      case "RECT FILLED":
-      case "SET & RECT FILLED":
-        drawRect(cmd.points, true);
-        break;
+      }
 
-      case "SET COLOR":
-      case "SELECT COLOR":
-        setColor(cmd.col);
+      case "arc": {
+        if (!cmd.points || cmd.points.length < 2) break;
+        const pts = cmd.points.map(toDevice);
+        const col = fgRgb();
+        if (pts.length === 2) {
+          const cx = (pts[0][0] + pts[1][0]) / 2;
+          const cy = (pts[0][1] + pts[1][1]) / 2;
+          const r = Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]) / 2;
+          const path = ellipsePath(cx, cy, r, r);
+          if (cmd.filled) canvas.fill([path], col);
+          else canvas.stroke(path, weight, col, { closed: true });
+        } else {
+          if (cmd.filled && pts.length >= 3) canvas.fill([pts], col);
+          else canvas.stroke(pts, weight, col, { closed: false });
+        }
         break;
+      }
 
-      default: // control codes and the opcodes TelidonP5 leaves as TODO
+      default:
         break;
     }
   }

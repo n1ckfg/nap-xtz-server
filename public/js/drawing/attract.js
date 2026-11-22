@@ -111,8 +111,8 @@ export class AttractMode {
 
             if (this.lastActivityTime !== activityAtStart) return;
 
-            const decoder = new window.NapDecoder([text]);
-            this._strokes = this._extract(decoder.cmds);
+            const decoded = window.NAPLPS.decode(text);
+            this._strokes = this._extract(decoded.commands);
 
             if (!this._strokes.length) { this.resetTimer(); return; }
 
@@ -140,19 +140,41 @@ export class AttractMode {
         const halfW = halfH * (640 / 480);
 
         const strokes = [];
-        let color = 0xffffff;
+        let palette = [];
+        let colorMode = 0;
+        let fgIndex = 0;
+        let direct = { r: 1, g: 1, b: 1 };
+
+        const currentColorHex = () => {
+            const c = colorMode === 0 ? direct : (palette[fgIndex] || { r: 1, g: 1, b: 1 });
+            const r = Math.max(0, Math.min(255, Math.round(c.r * 255)));
+            const g = Math.max(0, Math.min(255, Math.round(c.g * 255)));
+            const b = Math.max(0, Math.min(255, Math.round(c.b * 255)));
+            return (r << 16) | (g << 8) | b;
+        };
 
         for (const cmd of cmds) {
-            const id = cmd.opcode.id;
-
-            if (id === 'SET COLOR' || id === 'SELECT COLOR') {
-                const c = cmd.col;
-                color = ((c.x & 0xff) << 16) | ((c.y & 0xff) << 8) | (c.z & 0xff);
+            if (cmd.type === 'palette') {
+                palette = cmd.colors.map(c => ({ r: c.r, g: c.g, b: c.b }));
+                continue;
+            }
+            if (cmd.type === 'setPalette') {
+                palette[cmd.index] = { r: cmd.r, g: cmd.g, b: cmd.b };
+                continue;
+            }
+            if (cmd.type === 'setColor') {
+                if (!cmd.transparent) direct = { r: cmd.r, g: cmd.g, b: cmd.b };
+                continue;
+            }
+            if (cmd.type === 'selectColor') {
+                if (cmd.mode !== undefined) colorMode = cmd.mode;
+                if (cmd.index !== undefined) fgIndex = cmd.index;
                 continue;
             }
 
-            if (!id.includes('POLY') || !cmd.points || cmd.points.length < 4) continue;
+            if (cmd.type !== 'polygon' || !cmd.points || cmd.points.length < 4) continue;
 
+            const color = currentColorHex();
             const pts = cmd.points;
             const half = Math.floor(pts.length / 2);
             const centerline = [];
@@ -164,7 +186,7 @@ export class AttractMode {
                 const cy = (a.y + b.y) / 2;
 
                 const wx = (cx - 0.5) * 2 * halfW;
-                const wy = (cy - 0.5) * 2 * halfH;
+                const wy = (cy / 0.75 - 0.5) * 2 * halfH;
                 centerline.push(new THREE.Vector3(wx, wy, strokes.length * Z_STEP));
             }
 

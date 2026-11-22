@@ -86,7 +86,7 @@
 
 		// ── VHSC post-processing shader (blur → sharpen → posterize) ──
 		// A WEBGL graphics buffer runs the shader; the main canvas stays 2D so
-		// all existing TelidonDraw code works unchanged.
+		// all existing TelidonP5 code works unchanged.
 		let vhscGfx = null;   // p5.Graphics (WEBGL)
 		let vhscShader = null;
 
@@ -238,17 +238,32 @@
 			        return;
 			    }
 
-			    // Draw the (640-unit) artwork scaled to fill the canvas.
-			    push();
-			    scale(scaleFactor);
-			    translate(0,sH-sW);
-
+			    // Render each decoded NAPLPS drawing using TelidonP5's built-in
+			    // progressive vertex-by-vertex draw-on effect.  TelidonP5 maps the
+			    // 4:3 unit screen directly onto the canvas (width x height).
+			    const pg = p5.instance || window;
+			    const now = performance.now();
+			    const drawInterval = TelidonP5.PROGRESSIVE_DRAW_INTERVAL;
 			    let allFinished = true;
-			    for (let i=0; i<telidon.length; i++) {
-					telidon[i].draw();
-					if (!telidon[i].finished) allFinished = false;
+			    for (let i = 0; i < telidon.length; i++) {
+					const item = telidon[i];
+					const elapsedMs = Math.max(0, now - item.startTime);
+					const elapsedSec = elapsedMs / 1000;
+					const pointLimit = Math.floor(elapsedMs / drawInterval);
+					TelidonP5.render(pg, item.commands, {
+						width: width,
+						height: height,
+						progressiveDraw: true,
+						elapsed: elapsedMs,
+						time: item.duration > 0 ? elapsedSec : Infinity,
+						blinkTime: elapsedSec,
+						background: i === 0 ? 0 : color(0, 0, 0, 0)
+					});
+					item.finished = !item.hasBlink &&
+						pointLimit >= item.maxPts &&
+						(item.duration <= 0 || elapsedSec >= item.duration);
+					if (!item.finished) allFinished = false;
 				}
-			    pop();
 
 			    // ── VHSC post-processing pass ──
 			    // Run the main canvas through the blur→sharpen→posterize shader,
@@ -331,11 +346,21 @@
 			function drawNap(input, doClear=true) {
 				window.pendingNapRaw = input;
 				if (doClear) {
-					telidon = []
+					telidon = [];
 				} else {
 	            	if (telidon.length >= maxLength) telidon.splice(0,1);
 				}
-	            telidon.push(new TelidonDraw([input], sW, sW));
+				const decoded = NAPLPS.decode(input);
+				const commands = decoded.commands || [];
+	            telidon.push({
+					commands: commands,
+					format: decoded.format,
+					startTime: performance.now(),
+					maxPts: TelidonP5.maxPoints(commands),
+					duration: TelidonP5.duration(commands),
+					hasBlink: TelidonP5.hasBlink(commands),
+					finished: false
+				});
 	            recording = true;
 				setSize(input.length);
 				loop(); // new content to animate — restart the draw loop
@@ -426,11 +451,20 @@
 
 			// svg
 
+			function napBytesToString(bytes) {
+				let out = '';
+				for (let i = 0; i < bytes.length; i++) {
+					out += String.fromCharCode(bytes[i]);
+				}
+				return out;
+			}
+
 			function setupSvg(ps) {
 				let polylines, polygons, paths;
-				let input = [];
-				let offsetX = 0;
-				let offsetY = 0.25;
+				let commands = [
+					{ type: 'domain', multiBytes: 4, singleBytes: 1 },
+					{ type: 'reset', screen: true, r: 0, g: 0, b: 0 }
+				];
 
 			    let svgWidth = parseFloat(ps.attribute("width"));
 			    let svgHeight = parseFloat(ps.attribute("height"));
@@ -442,12 +476,13 @@
 
 		    	// NAPLPS can only use a fill color or a stroke color in one path, not both.
 				// fill-opacity, stroke-opacity, stroke-linecap, and stroke-width are not used.
+				// NAPLPS unit screen has x in [0, 1] and y in [0, 0.75] with bottom-left origin.
 
 			    polygons = ps.query('polygon');
 				
 			    for (let path of polygons) {
 			    	let points = [];
-			    	let color = new Vector3(255, 255, 255);
+			    	let color = { r: 255, g: 255, b: 255 };
 			    	let isFill = true;
 			    	
 					let strokeColorAttr = path.attribute("stroke"); // "#FEFEFE" or "none" 
@@ -455,33 +490,38 @@
 					
 					if (fillColorAttr !== "none") {
 						let colorHex = hexToRgb(fillColorAttr);
-						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+						if (colorHex) color = colorHex;
 					} else if (fillColorAttr === "none" && strokeColorAttr !== "none") {
 						let colorHex = hexToRgb(strokeColorAttr);
-						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+						if (colorHex) color = colorHex;
 					}
 
 			    	let pointsAttr = path.attribute("points").split(" ");
 			    	for (let pointAttr of pointsAttr) {
 			    		let pointAttrArray = pointAttr.split(",");
-			    		let point = new Vector2((float(pointAttrArray[0]) / sW) + offsetX, (float(pointAttrArray[1]/ sH * 0.75) + offsetY));
+			    		let point = {
+			    			x: float(pointAttrArray[0]) / sW,
+			    			y: (1 - float(pointAttrArray[1]) / sH) * 0.75
+			    		};
 			    		
-			    		if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+			    		if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 0.75) {
 			    			points.push(point);
 			    		}
 			    	}
 					
 					points = rdpSimplify(points);
 
-					const stroke = new NapInputWrapper(color, points, isFill);
-					input.push(stroke);
+					if (points.length >= 2) {
+						commands.push({ type: 'setColor', r: color.r / 255, g: color.g / 255, b: color.b / 255 });
+						commands.push({ type: 'polygon', filled: isFill, points: points });
+					}
 			    }
 
 			    polylines = ps.query('polyline');
 
 			    for (let path of polylines) {
 			    	let points = [];
-			    	let color = new Vector3(0, 0, 0);
+			    	let color = { r: 0, g: 0, b: 0 };
 			    	let isFill = false;
 			    	
 					let strokeColorAttr = path.attribute("stroke"); // "#FEFEFE" or "none" 
@@ -489,33 +529,38 @@
 					
 					if (strokeColorAttr === "none" && fillColorAttr !== "none") {
 						let colorHex = hexToRgb(fillColorAttr);
-						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+						if (colorHex) color = colorHex;
 					} else if (strokeColorAttr !== "none") {
 						let colorHex = hexToRgb(strokeColorAttr);
-						color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+						if (colorHex) color = colorHex;
 					}
 
 			    	let pointsAttr = path.attribute("points").split(" ");
 			    	for (let pointAttr of pointsAttr) {
 			    		let pointAttrArray = pointAttr.split(",");
-			    		let point = new Vector2((float(pointAttrArray[0]) / sW) + offsetX, (float(pointAttrArray[1]/ sH * 0.75) + offsetY));
+			    		let point = {
+			    			x: float(pointAttrArray[0]) / sW,
+			    			y: (1 - float(pointAttrArray[1]) / sH) * 0.75
+			    		};
 			    		
-			    		if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+			    		if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 0.75) {
 							points.push(point);
 						}
 			    	}
 					
 					points = rdpSimplify(points);
 
-					const stroke = new NapInputWrapper(color, points, isFill);
-					input.push(stroke);
+					if (points.length >= 2) {
+						commands.push({ type: 'setColor', r: color.r / 255, g: color.g / 255, b: color.b / 255 });
+						commands.push({ type: 'polygon', filled: isFill, points: points });
+					}
 			    }
 
 			    paths = ps.query('path'); //ps.elt.querySelectorAll('path');
 
 			    for (let path of paths) {
 			    	let points = [];
-			    	let color = new Vector3(255, 255, 255);
+			    	let color = { r: 255, g: 255, b: 255 };
 			    	let isFill = true;
 
 			    	let fillColorAttr = path.attribute('fill') || 'none';
@@ -523,13 +568,13 @@
 
 			    	if (fillColorAttr !== 'none') {
 			    		let colorHex = hexToRgb(fillColorAttr);
-			    		if (colorHex) color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+			    		if (colorHex) color = colorHex;
 			    	} else if (fillColorAttr === 'none' && strokeColorAttr !== 'none') {
 			    		isFill = false;
 			    		let colorHex = hexToRgb(strokeColorAttr);
-			    		if (colorHex) color = new Vector3(colorHex.r, colorHex.g, colorHex.b);
+			    		if (colorHex) color = colorHex;
 			    	} else {
-			    		color = new Vector3(255, 255, 255);
+			    		color = { r: 255, g: 255, b: 255 };
 			    	}
 
 			    	// Parse transform="translate(tx,ty)"
@@ -547,25 +592,26 @@
 			    	while ((m = cmdRegex.exec(d)) !== null) {
 			    		let px = parseFloat(m[1]) + tx;
 			    		let py = parseFloat(m[2]) + ty;
-			    		let point = new Vector2((px / svgWidth) + offsetX, ((py / svgHeight) * 0.75) + offsetY);
-			    		//if (point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+			    		let point = {
+			    			x: px / svgWidth,
+			    			y: (1 - py / svgHeight) * 0.75
+			    		};
 			    		points.push(point);
-			    		//}
 			    	}
 
 			    	points = rdpSimplify(points);
 
-			    	if (points.length > 0) {
-			    		const stroke = new NapInputWrapper(color, points, isFill);
-			    		input.push(stroke);
+			    	if (points.length >= 2) {
+			    		commands.push({ type: 'setColor', r: color.r / 255, g: color.g / 255, b: color.b / 255 });
+			    		commands.push({ type: 'polygon', filled: isFill, points: points });
 			    	}
 			    }
 
-				const encoder = new NapEncoder(input);
+				const napRaw = napBytesToString(NAPLPS.encode(commands));
 
 				// download nap
 				const _ts = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
-				const _blob = new Blob([encoder.napRaw], { type: 'text/plain' });
+				const _blob = new Blob([napRaw], { type: 'text/plain' });
 				const _url = URL.createObjectURL(_blob);
 				const _a = document.createElement('a');
 				_a.href = _url;
@@ -574,13 +620,13 @@
 				URL.revokeObjectURL(_url);
 
 				// Expose encoded NAPLPS for the Tezos mint flow.
-				window.pendingNapRaw = encoder.napRaw;
-				console.log('[nap-xtz] SVG encoded to NAPLPS, length:', encoder.napRaw.length);
+				window.pendingNapRaw = napRaw;
+				console.log('[nap-xtz] SVG encoded to NAPLPS, length:', napRaw.length);
 				const btnMint = document.getElementById('btn-mint');
 				if (btnMint) btnMint.style.display = 'inline-block';
 				if (typeof setStatus === 'function') setStatus('Local file load');
 
-				loadTelidonFromText(encoder.napRaw);
+				loadTelidonFromText(napRaw);
 			}
 
 		// The one simplification tolerance, and the only place on this page that

@@ -675,38 +675,38 @@ function inspect(files) {
 
   for (const file of files) {
     const napRaw = fs.readFileSync(file, "latin1").replace(/[\r\n]/g, "");
-    const decoder = new (napContext({}).NapDecoder)([napRaw]);
+    const decoded = napContext({}).NAPLPS.decode(napRaw);
+    const cmds = decoded.commands;
 
     const opcodes = new Map();
     const perPoly = new Map();
     let polys = 0;
-    let uneven = 0;
     let offFrame = 0;
     let folded = 0;
 
-    for (const cmd of decoder.cmds) {
-      const id = (cmd.opcode && cmd.opcode.id) || "(blank)";
+    for (const cmd of cmds) {
+      const id = cmd.type === "polygon"
+        ? (cmd.filled ? "polygon (filled)" : "polygon (outlined)")
+        : (cmd.type || "(blank)");
       opcodes.set(id, (opcodes.get(id) || 0) + 1);
 
       for (const p of cmd.points || []) {
-        if (!(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1)) offFrame++;
+        if (!(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 0.75)) offFrame++;
       }
 
-      if (!id.includes("POLY")) continue;
+      if (cmd.type !== "polygon") continue;
       polys++;
       perPoly.set(cmd.points.length, (perPoly.get(cmd.points.length) || 0) + 1);
-      if (cmd.pointBytes > 0 && cmd.data.length % cmd.pointBytes !== 0) uneven++;
       if (selfIntersections(cmd.points) > 0) folded++;
     }
 
     const sizes = [...perPoly.keys()].sort((a, b) => a - b);
-    console.log(`\n## ${file}  (${napRaw.length} bytes, ${decoder.cmds.length} commands, ${polys} POLY)`);
+    console.log(`\n## ${file}  (${napRaw.length} bytes, ${cmds.length} commands, ${polys} POLY)`);
     for (const [id, n] of [...opcodes].sort((a, b) => b[1] - a[1])) {
       console.log(`   ${String(n).padStart(6)}  ${id}`);
     }
     console.log(`   points per polygon: ${sizes.map((s) => `${s}:${perPoly.get(s)}`).join("  ") || "none"}`);
-    console.log(`   POLY with uneven operand bytes: ${uneven}${uneven ? "   <-- the Pi drops these whole" : ""}`);
-    console.log(`   decoded points outside the frame: ${offFrame}   (both renderers drop these)`);
+    console.log(`   decoded points outside the frame: ${offFrame}`);
     console.log(`   decoded polygons that cross themselves: ${folded}${folded ? "   <-- nonzero and even-odd will differ" : ""}`);
   }
 }
